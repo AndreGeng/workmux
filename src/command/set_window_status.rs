@@ -92,6 +92,64 @@ pub fn run(cmd: SetWindowStatusCommand) -> Result<()> {
 
             // Persist to state store so the dashboard sees this agent
             crate::state::persist_agent_update(&*mux, &pane_id, Some(status), None);
+
+            // Proactive notifications for Waiting / Done
+            let should_notify = match status {
+                AgentStatus::Waiting => config.notifications.on_waiting,
+                AgentStatus::Done => config.notifications.on_done,
+                AgentStatus::Working => false,
+            };
+
+            if should_notify {
+                let live_info = mux.get_live_pane_info(&pane_id).ok().flatten();
+
+                let label = live_info
+                    .as_ref()
+                    .and_then(|info| {
+                        info.working_dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| "Agent".to_string());
+
+                // Extract task description from the pane title (what the agent
+                // is currently working on). Strip agent prefixes like "OC | "
+                // and filter out noise (shell names, bare agent names, etc.).
+                let task: Option<String> = live_info
+                    .as_ref()
+                    .and_then(|info| {
+                        crate::agent_display::sanitize_pane_title(
+                            info.title.as_deref(),
+                            &label,
+                            &label,
+                        )
+                    })
+                    .map(str::to_string);
+
+                let (icon, action) = match status {
+                    AgentStatus::Waiting => ("\u{1F4AC}", "needs your input"),
+                    AgentStatus::Done => ("\u{2705}", "is done"),
+                    AgentStatus::Working => unreachable!(),
+                };
+
+                // title: "💬 feature-auth needs your input"
+                let title = format!("{icon} {label} {action}");
+                // body: task description if available, otherwise omit
+                let body = task.as_deref().unwrap_or("");
+
+                crate::notification::show_system(&title, None, body);
+
+                // tmux overlay: only on Linux where desktop notifications are
+                // less reliable; on macOS the system banner is sufficient.
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let overlay = match &task {
+                        Some(t) => format!("{icon} {label}: {t}"),
+                        None => format!("{icon} {label} — {action}"),
+                    };
+                    crate::notification::show_tmux_overlay(&overlay);
+                }
+            }
         }
     }
 

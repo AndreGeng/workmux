@@ -14,6 +14,7 @@ mod markdown;
 mod multiplexer;
 mod naming;
 mod nerdfont;
+mod notification;
 mod prompt;
 mod sandbox;
 mod shell;

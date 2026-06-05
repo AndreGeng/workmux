@@ -14,6 +14,10 @@ use which::{which, which_in};
 /// making the workmux remove command return almost instantly.
 const NODE_MODULES_CLEANUP_SCRIPT: &str = include_str!("scripts/cleanup_node_modules.sh");
 
+fn default_true() -> bool {
+    true
+}
+
 /// Configuration for file operations during worktree creation
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct FileConfig {
@@ -71,6 +75,29 @@ pub struct AutoNameConfig {
     /// Whether to always run in background mode when using --auto-name.
     /// If true, the window will be created but not focused.
     pub background: Option<bool>,
+}
+
+/// Configuration for system and in-terminal notifications.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct NotificationsConfig {
+    /// Show a system notification (and tmux overlay if in tmux) when an agent
+    /// needs user input (Waiting status). Default: true
+    #[serde(default = "default_true")]
+    pub on_waiting: bool,
+
+    /// Show a system notification when an agent finishes (Done status).
+    /// Default: false
+    #[serde(default)]
+    pub on_done: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            on_waiting: true,
+            on_done: false,
+        }
+    }
 }
 
 /// Configuration for dashboard actions (commit, merge keybindings)
@@ -487,6 +514,10 @@ pub struct Config {
     /// Sidebar configuration
     #[serde(default)]
     pub sidebar: SidebarConfig,
+
+    /// Notification configuration
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 
     /// Whether to use nerdfont icons (None = prompt user on first run)
     #[serde(default)]
