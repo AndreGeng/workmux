@@ -399,6 +399,21 @@ fn render_field(
             spans.push(styled_span(text, style, user_style, ctx));
         }
         pr_width
+    } else if id == TokenId::Cwd {
+        let text = ctx.resolve(id);
+        let rendered = if display_width(&text) > target_width {
+            truncate_leading_with_ellipsis(&text, target_width)
+        } else {
+            text
+        };
+        let rendered_width = display_width(&rendered);
+        spans.push(styled_span(
+            rendered,
+            ctx.intrinsic_style(id),
+            user_style,
+            ctx,
+        ));
+        rendered_width
     } else {
         let text = ctx.resolve(id);
         let rendered = if display_width(&text) > target_width {
@@ -494,6 +509,34 @@ fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
     result
 }
 
+fn truncate_leading_with_ellipsis(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width == 1 {
+        return "\u{2026}".to_string();
+    }
+
+    let suffix_width = max_width - 1;
+    let mut chars = Vec::new();
+    let mut width = 0;
+    for c in s.chars().rev() {
+        let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+        if width + char_width > suffix_width {
+            break;
+        }
+        chars.push(c);
+        width += char_width;
+    }
+
+    let mut result = String::from("\u{2026}");
+    result.extend(chars.into_iter().rev());
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::context::RowContext;
@@ -528,6 +571,12 @@ mod tests {
             agent_command: None,
             agent_kind: None,
         }
+    }
+
+    fn test_agent_with_path(path: &str) -> AgentPane {
+        let mut agent = test_agent("foo");
+        agent.path = PathBuf::from(path);
+        agent
     }
 
     fn make_context(agent: &AgentPane) -> RowContext<'_> {
@@ -588,6 +637,23 @@ mod tests {
         // elapsed = 4, available = 10 - 4 = 6, primary truncated to ~5 + ellipsis
         assert!(text.contains("5:23"));
         assert!(text.contains('…'));
+    }
+
+    #[test]
+    fn cwd_truncates_leading_path_segments() {
+        let agent = test_agent_with_path("/Users/mac/Documents/playground/workmux/src/command");
+        let ctx = make_context(&agent);
+        let text = render_text(&ctx, &[Token::Field(TokenId::Cwd)], 20);
+
+        assert_eq!(display_width(&text), 20);
+        assert!(
+            text.starts_with('…'),
+            "should truncate the path prefix: {text:?}"
+        );
+        assert!(
+            text.ends_with("workmux/src/command"),
+            "should keep the useful suffix: {text:?}"
+        );
     }
 
     #[test]

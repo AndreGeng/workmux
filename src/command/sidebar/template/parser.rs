@@ -25,6 +25,7 @@ pub enum TokenId {
     Primary,
     Secondary,
     Worktree,
+    Cwd,
     Project,
     Session,
     Window,
@@ -55,6 +56,7 @@ impl TokenId {
             TokenId::Primary
                 | TokenId::Secondary
                 | TokenId::Worktree
+                | TokenId::Cwd
                 | TokenId::Project
                 | TokenId::Session
                 | TokenId::Window
@@ -72,6 +74,7 @@ impl fmt::Display for TokenId {
             TokenId::Primary => "primary",
             TokenId::Secondary => "secondary",
             TokenId::Worktree => "worktree",
+            TokenId::Cwd => "cwd",
             TokenId::Project => "project",
             TokenId::Session => "session",
             TokenId::Window => "window",
@@ -217,6 +220,7 @@ pub fn parse_line(input: &str) -> Result<Vec<Token>, ParseError> {
                     "primary" => TokenId::Primary,
                     "secondary" => TokenId::Secondary,
                     "worktree" => TokenId::Worktree,
+                    "cwd" => TokenId::Cwd,
                     "project" => TokenId::Project,
                     "session" => TokenId::Session,
                     "window" => TokenId::Window,
@@ -433,6 +437,7 @@ mod tests {
             TokenId::Primary,
             TokenId::Secondary,
             TokenId::Worktree,
+            TokenId::Cwd,
             TokenId::Project,
             TokenId::Session,
             TokenId::Window,

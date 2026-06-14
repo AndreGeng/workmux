@@ -3,7 +3,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::agent_display::{extract_project_name, extract_worktree_name, sanitize_pane_title};
-use crate::agent_identity::AgentKind;
+use crate::agent_identity::{AgentKind, classify_agent_kind};
 use crate::git::GitStatus;
 use crate::github::PrSummary;
 use crate::multiplexer::agent::resolve_profile_for_display;
@@ -91,8 +91,11 @@ impl<'a> RowContext<'a> {
         let pane_title = build_pane_title(agent, &primary, &secondary, app.window_prefix());
         let git_status = app.git_statuses.get(&agent.path);
         let pr_summary = app.pr_statuses.get(&agent.path);
-        let kind =
-            effective_agent_kind(agent.agent_kind.as_deref(), agent.agent_command.as_deref());
+        let kind = effective_agent_kind(
+            agent.agent_kind.as_deref(),
+            agent.agent_command.as_deref(),
+            agent.pane_title.as_deref(),
+        );
         let agent_icon = resolve_agent_icon(kind, &app.agent_icons);
         let agent_icon_color = resolve_agent_icon_color(kind, &app.agent_icons);
         let agent_label = resolve_agent_label(kind);
@@ -126,6 +129,7 @@ impl<'a> RowContext<'a> {
             TokenId::Primary => self.primary.clone(),
             TokenId::Secondary => self.secondary.clone(),
             TokenId::Worktree => self.worktree_name(),
+            TokenId::Cwd => self.agent.path.display().to_string(),
             TokenId::Project => self.project_name(),
             TokenId::Session => self.agent.session.clone(),
             TokenId::Window => self.agent.window_name.clone(),
@@ -361,8 +365,15 @@ fn resolve_agent_icon_color(kind: Option<AgentKind>, icons: &ResolvedAgentIcons)
 fn effective_agent_kind(
     agent_kind: Option<&str>,
     agent_command: Option<&str>,
+    pane_title: Option<&str>,
 ) -> Option<AgentKind> {
     if let Some(kind) = agent_kind.and_then(AgentKind::from_str) {
+        return Some(kind);
+    }
+    if let Some(kind) = classify_agent_kind(agent_command, pane_title)
+        .as_deref()
+        .and_then(AgentKind::from_str)
+    {
         return Some(kind);
     }
     AgentKind::from_str(resolve_profile_for_display(agent_command).name())
@@ -433,8 +444,12 @@ fn format_compact_elapsed(secs: u64) -> String {
 mod tests {
     use super::*;
 
-    fn kind(agent_kind: Option<&str>, agent_command: Option<&str>) -> Option<AgentKind> {
-        effective_agent_kind(agent_kind, agent_command)
+    fn kind(
+        agent_kind: Option<&str>,
+        agent_command: Option<&str>,
+        pane_title: Option<&str>,
+    ) -> Option<AgentKind> {
+        effective_agent_kind(agent_kind, agent_command, pane_title)
     }
 
     #[test]
@@ -479,20 +494,31 @@ mod tests {
         // Command is a version string the stem-based resolver can't classify;
         // the cached kind must drive label/icon.
         assert_eq!(
-            resolve_agent_label(kind(Some("claude"), Some("2.1.118"))),
+            resolve_agent_label(kind(Some("claude"), Some("2.1.118"), None)),
             "Claude"
         );
     }
 
     #[test]
     fn cached_kind_renders_friendly_kiro_label() {
-        assert_eq!(resolve_agent_label(kind(Some("kiro-cli"), None)), "Kiro");
+        assert_eq!(
+            resolve_agent_label(kind(Some("kiro-cli"), None, None)),
+            "Kiro"
+        );
     }
 
     #[test]
     fn cached_kind_renders_friendly_opencode_label() {
         assert_eq!(
-            resolve_agent_label(kind(Some("opencode"), None)),
+            resolve_agent_label(kind(Some("opencode"), None, None)),
+            "OpenCode"
+        );
+    }
+
+    #[test]
+    fn render_time_fallback_uses_pane_title_for_alias_wrapped_opencode() {
+        assert_eq!(
+            resolve_agent_label(kind(None, Some("bash"), Some("OC | Investigating sidebar"))),
             "OpenCode"
         );
     }
@@ -502,11 +528,11 @@ mod tests {
         // Defensive: malformed cache must not shadow a valid agent_command.
         let icons = ResolvedAgentIcons::default();
         assert_eq!(
-            resolve_agent_label(kind(Some("not-a-profile"), Some("claude"))),
+            resolve_agent_label(kind(Some("not-a-profile"), Some("claude"), None)),
             "Claude"
         );
         assert_eq!(
-            resolve_agent_icon(kind(Some("not-a-profile"), Some("claude")), &icons),
+            resolve_agent_icon(kind(Some("not-a-profile"), Some("claude"), None), &icons),
             "CC"
         );
     }
@@ -514,8 +540,14 @@ mod tests {
     #[test]
     fn no_cache_falls_back_to_today_behavior() {
         let icons = ResolvedAgentIcons::default();
-        assert_eq!(resolve_agent_label(kind(None, Some("gemini"))), "Gemini");
-        assert_eq!(resolve_agent_icon(kind(None, Some("gemini")), &icons), "G");
+        assert_eq!(
+            resolve_agent_label(kind(None, Some("gemini"), None)),
+            "Gemini"
+        );
+        assert_eq!(
+            resolve_agent_icon(kind(None, Some("gemini"), None), &icons),
+            "G"
+        );
     }
 
     #[test]
@@ -523,7 +555,7 @@ mod tests {
         let mut icons = ResolvedAgentIcons::default();
         icons.icons.insert("claude".to_string(), "X".to_string());
         assert_eq!(
-            resolve_agent_icon(kind(Some("claude"), Some("2.1.118")), &icons),
+            resolve_agent_icon(kind(Some("claude"), Some("2.1.118"), None), &icons),
             "X"
         );
     }
@@ -812,7 +844,7 @@ mod tests {
     fn default_color_for_claude_is_brand_orange() {
         let icons = ResolvedAgentIcons::default();
         assert_eq!(
-            resolve_agent_icon_color(kind(Some("claude"), None), &icons),
+            resolve_agent_icon_color(kind(Some("claude"), None, None), &icons),
             Some(Color::Rgb(0xd9, 0x77, 0x57))
         );
     }
@@ -824,7 +856,7 @@ mod tests {
             .colors
             .insert("claude".to_string(), Some(Color::Rgb(0, 255, 0)));
         assert_eq!(
-            resolve_agent_icon_color(kind(Some("claude"), None), &icons),
+            resolve_agent_icon_color(kind(Some("claude"), None, None), &icons),
             Some(Color::Rgb(0, 255, 0))
         );
     }
@@ -834,7 +866,7 @@ mod tests {
         let mut icons = ResolvedAgentIcons::default();
         icons.colors.insert("claude".to_string(), None);
         assert_eq!(
-            resolve_agent_icon_color(kind(Some("claude"), None), &icons),
+            resolve_agent_icon_color(kind(Some("claude"), None, None), &icons),
             None
         );
     }

@@ -13,7 +13,9 @@
 use ratatui::style::Color;
 use std::path::Path;
 
-const GENERIC_INTERPRETERS: &[&str] = &["node", "python", "python3", "bun", "deno"];
+const GENERIC_INTERPRETERS: &[&str] = &[
+    "node", "python", "python3", "bun", "deno", "bash", "zsh", "sh", "fish",
+];
 
 /// Canonical set of agents the sidebar knows how to render.
 ///
@@ -159,7 +161,7 @@ fn classify_by_title(title: &str) -> Option<AgentKind> {
     if title.contains("Claude Code") {
         return Some(AgentKind::Claude);
     }
-    if title.contains("opencode") {
+    if title.contains("opencode") || title.starts_with("OC |") || title.contains(" OC |") {
         return Some(AgentKind::OpenCode);
     }
     if title.contains("Gemini") || title.contains('\u{25C7}') {
@@ -291,6 +293,14 @@ mod tests {
     fn opencode_via_node_title() {
         assert_eq!(
             classify("node", "⠹ opencode session"),
+            Some("opencode".into())
+        );
+        assert_eq!(
+            classify("node", "OC | Investigating sidebar"),
+            Some("opencode".into())
+        );
+        assert_eq!(
+            classify("bash", "OC | Investigating sidebar"),
             Some("opencode".into())
         );
     }

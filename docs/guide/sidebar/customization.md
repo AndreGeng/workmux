@@ -41,6 +41,7 @@ sidebars without a restart.
 | `{primary}`      | Primary identity label (worktree / window / session / project chain).                                                      |
 | `{secondary}`    | Secondary label from the same chain, with worktree appended if not already primary.                                        |
 | `{worktree}`     | Worktree directory name.                                                                                                   |
+| `{cwd}`          | Agent pane working directory path. When truncated, the beginning is elided so the most specific suffix remains visible.      |
 | `{project}`      | Project name (parent of the worktree).                                                                                     |
 | `{session}`      | Tmux session name (blank for workmux-prefixed sessions).                                                                   |
 | `{window}`       | Tmux window name (blank for generic shell names like `zsh`, `bash`).                                                       |
@@ -84,7 +85,7 @@ at column 1 in tiles[0]` until the template is fixed.
 `{fill}` is the only layout marker. Tokens before it form the left segment and
 tokens after it form the right segment. The leftmost flex token in the left
 segment absorbs ellipsis-truncation when there isn't enough room. Flex tokens
-are: `{primary}`, `{secondary}`, `{worktree}`, `{project}`, `{session}`,
+are: `{primary}`, `{secondary}`, `{worktree}`, `{cwd}`, `{project}`, `{session}`,
 `{window}`, `{pane_title}`. Other tokens always render at their natural width.
 
 When a line has more slack than the flex token needs, the leftover is emitted as
@@ -164,6 +165,11 @@ Notes:
 Adding `{agent_icon}` or `{agent_label}` to a template surfaces which agent is
 running in each pane. Identity is detected from the stored agent command via
 the same profile system used elsewhere in workmux.
+
+When an agent is launched through an alias or wrapper, the alias name itself is
+usually not visible to tmux after shell expansion. The sidebar falls back to
+well-known pane title markers for agents that run through generic interpreters,
+including OpenCode titles like `OC | ...`.
 
 Default icons:
 

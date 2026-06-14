@@ -50,7 +50,12 @@ fn derive_worktree_name_from_path(path: &Path) -> (String, bool) {
         }
     }
 
-    ("main".to_string(), true)
+    let project = extract_project_name(path);
+    if project.is_empty() {
+        ("main".to_string(), true)
+    } else {
+        (project, true)
+    }
 }
 
 /// Extract project name from a worktree path.
@@ -362,7 +367,20 @@ mod tests {
     fn test_extract_worktree_name_path_fallback_main() {
         let path = Path::new("/home/user/myproject");
         let (name, is_main) = extract_worktree_name("0", "zsh", "workmux:", path);
-        assert_eq!(name, "main");
+        assert_eq!(name, "myproject");
+        assert!(is_main);
+    }
+
+    #[test]
+    fn test_extract_worktree_name_path_fallback_subdir_uses_project() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project_dir = temp.path().join("myproject");
+        std::fs::create_dir_all(project_dir.join(".git")).unwrap();
+        let subdir = project_dir.join("src").join("command");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let (name, is_main) = extract_worktree_name("0", "zsh", "workmux:", &subdir);
+        assert_eq!(name, "myproject");
         assert!(is_main);
     }
 
