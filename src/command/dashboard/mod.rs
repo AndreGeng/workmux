@@ -41,6 +41,7 @@ use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind},
     execute,
+    style::Print,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::backend::CrosstermBackend;
@@ -58,6 +59,8 @@ use self::diff_ops::DiffOps;
 use self::keymap::{Context, action_for_key};
 use self::spinner::SPINNER_FRAME_COUNT;
 use self::ui::ui;
+
+const CLEAR_TERMINAL_GRAPHICS: &str = "\x1b_Ga=d\x1b\\";
 
 /// Determine the current keymap context based on app state.
 fn get_context(app: &App) -> Context {
@@ -137,7 +140,13 @@ pub fn run(
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        Print(CLEAR_TERMINAL_GRAPHICS),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        Print(CLEAR_TERMINAL_GRAPHICS)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 

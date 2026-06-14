@@ -544,20 +544,7 @@ fn render_preview(f: &mut Frame, app: &mut App, area: Rect) {
             if trimmed.is_empty() {
                 (Text::raw("(empty output)"), 1u16)
             } else {
-                // Parse ANSI escape sequences to get colored text
-                match trimmed.into_text() {
-                    Ok(text) => {
-                        let count = text.lines.len() as u16;
-                        (text, count)
-                    }
-                    Err(_) => {
-                        // Fallback: strip ANSI escapes to prevent raw control
-                        // sequences from corrupting the terminal display
-                        let safe = super::super::ansi::strip_ansi_escapes(trimmed);
-                        let count = safe.lines().count() as u16;
-                        (Text::raw(safe), count)
-                    }
-                }
+                preview_text(trimmed)
             }
         }
         (None, Some(_)) => (Text::raw("(pane not available)"), 1),
@@ -574,6 +561,81 @@ fn render_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let paragraph = Paragraph::new(text).block(block).scroll((scroll_offset, 0));
 
     f.render_widget(paragraph, area);
+}
+
+fn preview_text(trimmed: &str) -> (Text<'static>, u16) {
+    let safe = super::super::ansi::sanitize_ansi_for_preview(trimmed);
+
+    match safe.as_str().into_text() {
+        Ok(text) => {
+            let count = text.lines.len() as u16;
+            (text, count)
+        }
+        Err(_) => {
+            // Fallback: strip ANSI escapes to prevent raw control sequences
+            // from corrupting the terminal display.
+            let safe = super::super::ansi::strip_ansi_escapes(&safe);
+            let count = safe.lines().count() as u16;
+            (Text::raw(safe), count)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    fn flatten_text(text: &Text<'_>) -> String {
+        text.lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn preview_strips_terminal_graphics_but_keeps_text() {
+        let (text, line_count) = preview_text("top\x1b_Ga=T,f=100;AAAA\x1b\\bottom");
+
+        assert_eq!(line_count, 1);
+        let rendered = flatten_text(&text);
+        assert_eq!(rendered, "topbottom");
+        assert!(!rendered.contains('\x1b'));
+    }
+
+    #[test]
+    fn preview_preserves_sgr_colors() {
+        let (text, line_count) = preview_text("a\x1b[31mb\x1b[0mc");
+
+        assert_eq!(line_count, 1);
+        assert_eq!(flatten_text(&text), "abc");
+        assert!(
+            text.lines[0]
+                .spans
+                .iter()
+                .any(|span| span.style.fg.is_some())
+        );
+    }
+
+    #[test]
+    fn preview_drops_background_colors() {
+        let (text, line_count) = preview_text("a\x1b[48;2;10;20;30mb\x1b[0mc");
+
+        assert_eq!(line_count, 1);
+        assert_eq!(flatten_text(&text), "abc");
+        assert!(
+            text.lines[0]
+                .spans
+                .iter()
+                .all(|span| matches!(span.style.bg, None | Some(Color::Reset)))
+        );
+    }
 }
 
 // ── Footer rendering ────────────────────────────────────────────
