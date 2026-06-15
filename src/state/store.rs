@@ -714,6 +714,7 @@ mod tests {
             sidebar_layout: None,
             sidebar_width: None,
             sidebar_height: None,
+            sidebar_order: Vec::new(),
         };
 
         store.save_settings(&settings).unwrap();

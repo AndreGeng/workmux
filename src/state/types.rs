@@ -189,6 +189,10 @@ pub struct GlobalSettings {
     /// Sidebar height in rows (manual override synced across windows)
     #[serde(default)]
     pub sidebar_height: Option<u16>,
+
+    /// Manual sidebar pane order, written by drag-and-drop reordering.
+    #[serde(default)]
+    pub sidebar_order: Vec<String>,
 }
 
 /// Tracks which pane last-done navigated to, so repeated presses cycle

@@ -63,6 +63,7 @@ pub fn build_snapshot(
     git_statuses: HashMap<PathBuf, GitStatus>,
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
     sleeping_pane_ids: &HashSet<String>,
+    manual_order: &[String],
 ) -> SidebarSnapshot {
     let done_icon = status_icons.done();
     let waiting_icon = status_icons.waiting();
@@ -88,20 +89,7 @@ pub fn build_snapshot(
         .unwrap_or_default()
         .as_secs();
 
-    agents.sort_by_cached_key(|a| {
-        let is_sleeping = sleeping_pane_ids.contains(&a.pane_id);
-        let elapsed = a
-            .status_ts
-            .map(|ts| now.saturating_sub(ts))
-            .unwrap_or(u64::MAX);
-        let pane_num: u64 = a
-            .pane_id
-            .strip_prefix('%')
-            .unwrap_or(&a.pane_id)
-            .parse()
-            .unwrap_or(u64::MAX);
-        (is_sleeping, elapsed, pane_num)
-    });
+    sort_agents(&mut agents, sleeping_pane_ids, manual_order, now);
 
     // Populate window_id from the tmux state lookup
     for agent in &mut agents {
@@ -149,25 +137,62 @@ pub fn build_snapshot(
     }
 }
 
+fn sort_agents(
+    agents: &mut [AgentPane],
+    sleeping_pane_ids: &HashSet<String>,
+    manual_order: &[String],
+    now: u64,
+) {
+    let order_index: HashMap<&str, usize> = manual_order
+        .iter()
+        .enumerate()
+        .map(|(idx, pane_id)| (pane_id.as_str(), idx))
+        .collect();
+
+    agents.sort_by_cached_key(|a| {
+        let manual_idx = order_index.get(a.pane_id.as_str()).copied();
+        let is_sleeping = sleeping_pane_ids.contains(&a.pane_id);
+        let elapsed = a
+            .status_ts
+            .map(|ts| now.saturating_sub(ts))
+            .unwrap_or(u64::MAX);
+        let pane_num: u64 = a
+            .pane_id
+            .strip_prefix('%')
+            .unwrap_or(&a.pane_id)
+            .parse()
+            .unwrap_or(u64::MAX);
+
+        match manual_idx {
+            Some(idx) => (0, idx, is_sleeping, elapsed, pane_num),
+            None => (1, usize::MAX, is_sleeping, elapsed, pane_num),
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn agent(path: &str) -> AgentPane {
+    fn agent_with_pane(path: &str, pane_id: &str, status_ts: Option<u64>) -> AgentPane {
         AgentPane {
             session: "s".to_string(),
             window_name: "w".to_string(),
-            pane_id: "%1".to_string(),
+            pane_id: pane_id.to_string(),
             window_id: String::new(),
             path: PathBuf::from(path),
             pane_title: None,
             status: None,
-            status_ts: None,
+            status_ts,
             updated_ts: None,
             window_cmd: None,
             agent_command: None,
             agent_kind: None,
         }
+    }
+
+    fn agent(path: &str) -> AgentPane {
+        agent_with_pane(path, "%1", None)
     }
 
     fn pr(number: u32) -> PrSummary {
@@ -189,10 +214,11 @@ mod tests {
         }
     }
 
-    fn build(
+    fn build_with_order(
         agents: Vec<AgentPane>,
         git_statuses: HashMap<PathBuf, GitStatus>,
         pr_statuses: HashMap<PathBuf, PrPathEntry>,
+        manual_order: Vec<String>,
     ) -> SidebarSnapshot {
         build_snapshot(
             agents,
@@ -207,7 +233,59 @@ mod tests {
             git_statuses,
             pr_statuses,
             &HashSet::new(),
+            &manual_order,
         )
+    }
+
+    fn build(
+        agents: Vec<AgentPane>,
+        git_statuses: HashMap<PathBuf, GitStatus>,
+        pr_statuses: HashMap<PathBuf, PrPathEntry>,
+    ) -> SidebarSnapshot {
+        build_with_order(agents, git_statuses, pr_statuses, Vec::new())
+    }
+
+    #[test]
+    fn manual_order_wins_over_recency_sort() {
+        let snapshot = build_with_order(
+            vec![
+                agent_with_pane("/repo-a", "%1", Some(300)),
+                agent_with_pane("/repo-b", "%2", Some(100)),
+                agent_with_pane("/repo-c", "%3", Some(200)),
+            ],
+            HashMap::new(),
+            HashMap::new(),
+            vec!["%3".to_string(), "%1".to_string(), "%2".to_string()],
+        );
+
+        let panes: Vec<_> = snapshot
+            .agents
+            .iter()
+            .map(|agent| agent.pane_id.as_str())
+            .collect();
+        assert_eq!(panes, vec!["%3", "%1", "%2"]);
+    }
+
+    #[test]
+    fn manual_order_appends_new_agents_by_default_sort() {
+        let snapshot = build_with_order(
+            vec![
+                agent_with_pane("/repo-a", "%1", Some(300)),
+                agent_with_pane("/repo-b", "%2", Some(100)),
+                agent_with_pane("/repo-c", "%3", Some(200)),
+                agent_with_pane("/repo-d", "%4", Some(400)),
+            ],
+            HashMap::new(),
+            HashMap::new(),
+            vec!["%3".to_string(), "%1".to_string()],
+        );
+
+        let panes: Vec<_> = snapshot
+            .agents
+            .iter()
+            .map(|agent| agent.pane_id.as_str())
+            .collect();
+        assert_eq!(panes, vec!["%3", "%1", "%4", "%2"]);
     }
 
     #[test]

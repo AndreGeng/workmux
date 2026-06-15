@@ -241,6 +241,13 @@ fn read_sleeping_panes() -> HashSet<String> {
         .unwrap_or_default()
 }
 
+fn read_manual_order() -> Vec<String> {
+    StateStore::new()
+        .and_then(|store| store.load_settings())
+        .map(|settings| settings.sidebar_order)
+        .unwrap_or_default()
+}
+
 /// Shared git status cache, updated by a background worker thread.
 type GitCache = Arc<Mutex<HashMap<PathBuf, GitStatus>>>;
 
@@ -1442,6 +1449,7 @@ pub fn run() -> Result<()> {
                 )
             };
             let sleeping_pane_ids = read_sleeping_panes();
+            let manual_order = read_manual_order();
             let git_statuses = git_cache.lock().ok().map(|c| c.clone()).unwrap_or_default();
             let pr_statuses = pr_cache.lock().ok().map(|c| c.clone()).unwrap_or_default();
             let captured_panes = gather_captures(&agents, mux.as_ref(), &inactivity_tracker);
@@ -1465,6 +1473,7 @@ pub fn run() -> Result<()> {
                     git_statuses,
                     pr_statuses,
                     sleeping_pane_ids,
+                    manual_order,
                 },
                 &mut inactivity_tracker,
                 &last_interrupted,
@@ -1637,6 +1646,7 @@ struct TickInput {
     git_statuses: HashMap<PathBuf, GitStatus>,
     pr_statuses: HashMap<PathBuf, PrPathEntry>,
     sleeping_pane_ids: HashSet<String>,
+    manual_order: Vec<String>,
 }
 
 /// A state-file write to apply after computing the tick.
@@ -1680,6 +1690,7 @@ fn compute_tick(
         git_statuses,
         pr_statuses,
         sleeping_pane_ids,
+        manual_order,
     } = input;
 
     // Phase 1: Inactivity detection
@@ -1714,6 +1725,7 @@ fn compute_tick(
         git_statuses,
         pr_statuses,
         &sleeping_pane_ids,
+        &manual_order,
     );
     snapshot.interrupted_pane_ids = interrupted.clone();
 
@@ -2210,6 +2222,7 @@ mod tests {
                     git_statuses: HashMap::new(),
                     pr_statuses: HashMap::new(),
                     sleeping_pane_ids: HashSet::new(),
+                    manual_order: Vec::new(),
                 },
                 tracker,
                 last,

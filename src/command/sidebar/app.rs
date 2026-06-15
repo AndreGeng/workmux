@@ -51,6 +51,12 @@ enum SelectionMode {
     Manual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DragState {
+    source_idx: usize,
+    current_idx: usize,
+}
+
 /// Runtime form of `sidebar.agent_icons`: icon strings and parsed colors.
 ///
 /// Built once when config loads or reloads. Color strings are parsed eagerly
@@ -174,6 +180,7 @@ pub struct SidebarApp {
     /// Whether this sidebar's host window is the active window in the session
     host_window_active: bool,
     selection_mode: SelectionMode,
+    drag_state: Option<DragState>,
     /// Git status per worktree path (received from daemon snapshots).
     pub git_statuses: HashMap<PathBuf, GitStatus>,
     /// PR summary per worktree path (received from daemon snapshots).
@@ -248,6 +255,7 @@ impl SidebarApp {
             host_agent_idx: None,
             host_window_active: true,
             selection_mode: SelectionMode::FollowHost,
+            drag_state: None,
             git_statuses: HashMap::new(),
             pr_statuses: HashMap::new(),
             interrupted_pane_ids: std::collections::HashSet::new(),
@@ -326,6 +334,7 @@ impl SidebarApp {
             host_agent_idx: None,
             host_window_active: true,
             selection_mode: SelectionMode::FollowHost,
+            drag_state: None,
             git_statuses: HashMap::new(),
             pr_statuses: HashMap::new(),
             interrupted_pane_ids: std::collections::HashSet::new(),
@@ -586,6 +595,61 @@ impl SidebarApp {
                 }
                 None
             }
+        }
+    }
+
+    pub fn start_drag(&mut self, idx: usize) {
+        if idx >= self.agents.len() {
+            return;
+        }
+        self.selection_mode = SelectionMode::Manual;
+        self.drag_state = Some(DragState {
+            source_idx: idx,
+            current_idx: idx,
+        });
+        self.list_state.select(Some(idx));
+    }
+
+    pub fn update_drag(&mut self, idx: usize) {
+        let Some(mut drag_state) = self.drag_state else {
+            return;
+        };
+        if idx >= self.agents.len() || idx == drag_state.current_idx {
+            return;
+        }
+        let agent = self.agents.remove(drag_state.current_idx);
+        self.agents.insert(idx, agent);
+        drag_state.current_idx = idx;
+        self.drag_state = Some(drag_state);
+        self.list_state.select(Some(idx));
+    }
+
+    pub fn cancel_drag(&mut self) {
+        self.drag_state = None;
+    }
+
+    pub fn finish_drag(&mut self) -> bool {
+        let Some(drag_state) = self.drag_state.take() else {
+            return false;
+        };
+        if drag_state.source_idx == drag_state.current_idx {
+            return false;
+        }
+        self.persist_sidebar_order();
+        super::daemon_ctrl::signal_daemon();
+        true
+    }
+
+    fn persist_sidebar_order(&self) {
+        if let Ok(store) = crate::state::StateStore::new()
+            && let Ok(mut settings) = store.load_settings()
+        {
+            settings.sidebar_order = self
+                .agents
+                .iter()
+                .map(|agent| agent.pane_id.clone())
+                .collect();
+            let _ = store.save_settings(&settings);
         }
     }
 

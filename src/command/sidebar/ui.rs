@@ -539,88 +539,104 @@ fn render_horizontal_bar(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
         top_templates
     };
     let row_count = top_templates.len().min(inner.height as usize);
-    let mut visible_count = 0;
-    let mut rows = vec![Vec::new(); row_count];
-    let mut x = inner.x;
+    let mut rows = Vec::new();
     let max_x = inner.x.saturating_add(inner.width);
 
-    let start = app
-        .first_visible_agent_idx
-        .min(app.agents.len().saturating_sub(1));
-    app.first_visible_agent_idx = start;
+    // The horizontal sidebar implements its own windowing with
+    // `first_visible_agent_idx`. Unlike ratatui's vertical List widget, no
+    // stateful render pass adjusts an item offset for us.  If the selected
+    // agent moves past the visible chips, update the window and rebuild the
+    // rows in the same frame; otherwise the highlight appears to lag by one
+    // keypress/tick when using Up/Down (or j/k) near the edge.
+    for _ in 0..2 {
+        app.horizontal_hitboxes.clear();
+        rows = vec![Vec::new(); row_count];
+        let mut x = inner.x;
+        let mut visible_count = 0;
 
-    for (idx, agent) in app.agents.iter().enumerate().skip(start) {
-        let ctx = RowContext::build(app, agent, idx, &pane_suffixes, now_secs, selected_idx);
-        let available = max_x.saturating_sub(x) as usize;
-        if available == 0 {
-            break;
-        }
-        let chip_width = available.min(app.horizontal_item_width);
-        let has_status_icon = ctx
-            .status_icon_spans
-            .iter()
-            .any(|(text, _)| !text.trim().is_empty());
-        let render_options = RenderOptions::default().with_field_min_width(
-            TokenId::StatusIcon,
-            ctx.natural_width(TokenId::StatusIcon) + status_icon_extra_width(&ctx),
-        );
-        let mut chip_lines: Vec<Vec<Span<'static>>> = top_templates
-            .iter()
-            .map(|template| {
-                let template = if has_status_icon {
-                    template.clone()
-                } else {
-                    remove_blank_status_prefix(template)
-                };
-                let mut line =
-                    render_line_with_options(&ctx, &template, chip_width, &render_options);
-                if ctx.is_selected {
-                    for span in &mut line {
-                        if span.style.bg.is_none() {
-                            span.style = span.style.bg(app.palette.highlight_row_bg);
+        let start = app
+            .first_visible_agent_idx
+            .min(app.agents.len().saturating_sub(1));
+        app.first_visible_agent_idx = start;
+
+        for (idx, agent) in app.agents.iter().enumerate().skip(start) {
+            let ctx = RowContext::build(app, agent, idx, &pane_suffixes, now_secs, selected_idx);
+            let available = max_x.saturating_sub(x) as usize;
+            if available == 0 {
+                break;
+            }
+            let chip_width = available.min(app.horizontal_item_width);
+            let has_status_icon = ctx
+                .status_icon_spans
+                .iter()
+                .any(|(text, _)| !text.trim().is_empty());
+            let render_options = RenderOptions::default().with_field_min_width(
+                TokenId::StatusIcon,
+                ctx.natural_width(TokenId::StatusIcon) + status_icon_extra_width(&ctx),
+            );
+            let mut chip_lines: Vec<Vec<Span<'static>>> = top_templates
+                .iter()
+                .map(|template| {
+                    let template = if has_status_icon {
+                        template.clone()
+                    } else {
+                        remove_blank_status_prefix(template)
+                    };
+                    let mut line =
+                        render_line_with_options(&ctx, &template, chip_width, &render_options);
+                    if ctx.is_selected {
+                        for span in &mut line {
+                            if span.style.bg.is_none() {
+                                span.style = span.style.bg(app.palette.highlight_row_bg);
+                            }
                         }
                     }
-                }
-                line
-            })
-            .collect();
-        let has_content = chip_lines.iter().any(|line| {
-            line.iter()
-                .any(|span| !span.content.as_ref().trim().is_empty())
-        });
-        let width = chip_width as u16;
-        if !has_content || x.saturating_add(width) > max_x {
-            break;
-        }
-        for line in &mut chip_lines {
-            pad_spans_to_width(
-                line,
-                chip_width,
-                ctx.is_selected.then_some(app.palette.highlight_row_bg),
-            );
-        }
-        app.horizontal_hitboxes.push(super::app::HitBox {
-            idx,
-            x_start: x,
-            x_end: x.saturating_add(width),
-        });
-        for (row, chip_line) in rows.iter_mut().zip(chip_lines.iter_mut()) {
-            row.extend(std::mem::take(chip_line));
-        }
-        x = x.saturating_add(width);
-        visible_count += 1;
-
-        if x.saturating_add(2) < max_x && idx + 1 < app.agents.len() {
-            for row in &mut rows {
-                row.push(Span::raw(" "));
-                row.push(Span::styled("│", Style::default().fg(app.palette.border)));
-                row.push(Span::raw(" "));
+                    line
+                })
+                .collect();
+            let has_content = chip_lines.iter().any(|line| {
+                line.iter()
+                    .any(|span| !span.content.as_ref().trim().is_empty())
+            });
+            let width = chip_width as u16;
+            if !has_content || x.saturating_add(width) > max_x {
+                break;
             }
-            x = x.saturating_add(3);
+            for line in &mut chip_lines {
+                pad_spans_to_width(
+                    line,
+                    chip_width,
+                    ctx.is_selected.then_some(app.palette.highlight_row_bg),
+                );
+            }
+            app.horizontal_hitboxes.push(super::app::HitBox {
+                idx,
+                x_start: x,
+                x_end: x.saturating_add(width),
+            });
+            for (row, chip_line) in rows.iter_mut().zip(chip_lines.iter_mut()) {
+                row.extend(std::mem::take(chip_line));
+            }
+            x = x.saturating_add(width);
+            visible_count += 1;
+
+            if x.saturating_add(2) < max_x && idx + 1 < app.agents.len() {
+                for row in &mut rows {
+                    row.push(Span::raw(" "));
+                    row.push(Span::styled("│", Style::default().fg(app.palette.border)));
+                    row.push(Span::raw(" "));
+                }
+                x = x.saturating_add(3);
+            }
+        }
+
+        let before = app.first_visible_agent_idx;
+        app.ensure_selected_visible(visible_count);
+        if app.first_visible_agent_idx == before {
+            break;
         }
     }
 
-    app.ensure_selected_visible(visible_count);
     for (row_idx, spans) in rows.into_iter().enumerate() {
         let area = Rect::new(inner.x, inner.y + row_idx as u16, inner.width, 1);
         f.render_widget(Line::from(spans), area);

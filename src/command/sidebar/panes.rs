@@ -73,6 +73,13 @@ pub(super) fn create_sidebar_in_window(
         .trim()
         .to_string();
 
+    // tmux only forwards mouse drag/release events to pane applications when
+    // mouse mode is enabled. Enable it here so terminals such as Ghostty can
+    // deliver crossterm mouse events to the sidebar TUI.
+    let _ = Cmd::new("tmux")
+        .args(&["set-option", "-g", "mouse", "on"])
+        .run();
+
     Cmd::new("tmux")
         .args(&[
             "set-option",
