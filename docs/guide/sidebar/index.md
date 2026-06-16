@@ -69,6 +69,11 @@ sidebar:
 
   # Layout mode for the left sidebar: "compact" or "tiles" (default)
   layout: tiles
+
+  # Optional tree grouping for the left sidebar
+  tree:
+    enabled: true
+    group_by: project # "project" (default), "session", or "window"
 ```
 
 For a horizontal top bar:
@@ -104,6 +109,13 @@ The left sidebar supports two layout modes, toggled with `v`:
 - **Tiles** (default): variable-height cards with status stripe
 - **Compact**: single line per agent
 
+Set `tree.enabled: true` to group the left sidebar under collapsible headers.
+Tree mode preserves the selected layout, so you can use grouped compact rows or
+grouped tiles. The top bar remains flat because horizontal chips do not have
+enough vertical space for a tree.
+Drag-and-drop reordering works within a group; dragging group headers or moving
+agents across groups is ignored.
+
 Your preference is persisted across tmux restarts. The top bar always uses a
 horizontal chip layout, so `v` has no effect there. Horizontal templates render
 as many configured lines as the current height allows.
@@ -118,7 +130,8 @@ the list. Requires `set -g mouse on` in your `~/.tmux.conf`.
 | Key     | Action                   |
 | ------- | ------------------------ |
 | `j`/`k` | Navigate up/down         |
-| `Enter` | Jump to agent pane       |
+| `Enter` | Jump to agent pane, or expand/collapse a group |
+| `Space` | Expand/collapse a group  |
 | `g`/`G` | Jump to first/last       |
 | `v`     | Toggle layout mode       |
 | `z`     | Toggle sleeping on agent |

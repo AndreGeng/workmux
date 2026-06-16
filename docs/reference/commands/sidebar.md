@@ -70,6 +70,9 @@ sidebar:
   width: 40 # left width in columns (default: "10%", clamped 25-50)
   # width: "15%"
   layout: tiles # left only: "compact" or "tiles" (default)
+  tree:
+    enabled: true
+    group_by: project # "project" (default), "session", or "window"
 ```
 
 For a horizontal top bar:
@@ -93,8 +96,9 @@ persisted across restarts. Height only applies to `position: top`; set it as a
 row count for the number of horizontal lines you want to show. The top bar uses a
 horizontal chip layout, so `v` has no effect there. Horizontal templates render
 as many configured lines as the current height allows. `horizontal.item_width`
-controls each chip width and is clamped between 12 and 80 columns. Position
-changes take effect after toggling the sidebar off and on.
+controls each chip width and is clamped between 12 and 80 columns. Tree grouping
+only applies to the left sidebar. Position changes take effect after toggling the
+sidebar off and on.
 
 ## How it works
 

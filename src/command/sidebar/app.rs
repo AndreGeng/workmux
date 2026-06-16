@@ -11,11 +11,14 @@ use std::time::{Duration, Instant};
 
 use crate::agent_display::{extract_project_name, extract_worktree_name, resolve_labels};
 use crate::cmd::Cmd;
-use crate::config::{AgentIcons, Config, SidebarPosition, SidebarWidth, StatusIcons};
+use crate::config::{
+    AgentIcons, Config, SidebarPosition, SidebarTreeGroupBy, SidebarWidth, StatusIcons,
+};
 use crate::git::GitStatus;
 use crate::github::PrSummary;
 use ratatui::style::Color;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::str::FromStr;
 use tracing::warn;
 
@@ -80,6 +83,21 @@ pub struct HitBox {
     pub idx: usize,
     pub x_start: u16,
     pub x_end: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarDisplayRow {
+    Group {
+        key: String,
+        label: String,
+        agent_count: usize,
+        sleeping_count: usize,
+        expanded: bool,
+    },
+    Agent {
+        agent_idx: usize,
+        depth: usize,
+    },
 }
 
 impl ResolvedAgentIcons {
@@ -203,6 +221,14 @@ pub struct SidebarApp {
     pub first_visible_agent_idx: usize,
     /// Maximum width of each horizontal item in columns.
     pub horizontal_item_width: usize,
+    /// Whether left sidebar rows should be grouped under tree headers.
+    pub tree_enabled: bool,
+    /// Field used to group tree rows.
+    pub tree_group_by: SidebarTreeGroupBy,
+    /// Group keys currently collapsed by the user.
+    pub collapsed_tree_groups: HashSet<String>,
+    /// Render-time display rows for the left sidebar.
+    pub display_rows: Vec<SidebarDisplayRow>,
     /// Last `config_version` from the daemon snapshot. Increments trigger a
     /// client-side config reload.
     pub last_config_version: u64,
@@ -271,6 +297,10 @@ impl SidebarApp {
             horizontal_hitboxes: Vec::new(),
             first_visible_agent_idx: 0,
             horizontal_item_width: 24,
+            tree_enabled: false,
+            tree_group_by: SidebarTreeGroupBy::Project,
+            collapsed_tree_groups: HashSet::new(),
+            display_rows: Vec::new(),
             last_config_version: 0,
             current_compact_str: "{primary}".to_string(),
             current_tile_strs: vec!["{primary}".to_string()],
@@ -307,6 +337,8 @@ impl SidebarApp {
         let agent_icons = ResolvedAgentIcons::from_config(config.sidebar.agent_icons.as_ref());
         let current_width = config.sidebar.width.clone();
         let horizontal_item_width = config.sidebar.horizontal.item_width();
+        let tree_enabled = config.sidebar.tree.enabled.unwrap_or(false);
+        let tree_group_by = config.sidebar.tree.group_by.unwrap_or_default();
         let position = super::read_sidebar_position(&config);
 
         // Seed last_window_width so the first resize event after startup grace
@@ -346,6 +378,10 @@ impl SidebarApp {
             horizontal_hitboxes: Vec::new(),
             first_visible_agent_idx: 0,
             horizontal_item_width,
+            tree_enabled,
+            tree_group_by,
+            collapsed_tree_groups: HashSet::new(),
+            display_rows: Vec::new(),
             last_config_version: 0,
             current_compact_str,
             current_tile_strs,
@@ -410,23 +446,24 @@ impl SidebarApp {
 
         // Preserve selection by pane_id
         let selected_pane = self
-            .list_state
-            .selected()
+            .selected_agent_idx()
             .and_then(|i| self.agents.get(i))
             .map(|a| a.pane_id.clone());
 
         self.agents = snapshot.agents;
+        self.rebuild_display_rows();
 
         // Restore selection
         if let Some(ref pane_id) = selected_pane {
             if let Some(idx) = self.agents.iter().position(|a| &a.pane_id == pane_id) {
-                self.list_state.select(Some(idx));
+                self.list_state
+                    .select(Some(self.display_row_for_agent_idx(idx).unwrap_or(idx)));
             } else if !self.agents.is_empty() {
                 let clamped = self
                     .list_state
                     .selected()
                     .unwrap_or(0)
-                    .min(self.agents.len() - 1);
+                    .min(self.visible_row_count().saturating_sub(1));
                 self.list_state.select(Some(clamped));
             } else {
                 self.list_state.select(None);
@@ -444,7 +481,8 @@ impl SidebarApp {
             return;
         }
         if let Some(idx) = self.host_agent_idx {
-            self.list_state.select(Some(idx));
+            self.list_state
+                .select(Some(self.display_row_for_agent_idx(idx).unwrap_or(idx)));
         }
     }
 
@@ -488,7 +526,10 @@ impl SidebarApp {
 
         self.agent_icons = ResolvedAgentIcons::from_config(cfg.sidebar.agent_icons.as_ref());
         self.horizontal_item_width = cfg.sidebar.horizontal.item_width();
+        self.tree_enabled = cfg.sidebar.tree.enabled.unwrap_or(false);
+        self.tree_group_by = cfg.sidebar.tree.group_by.unwrap_or_default();
         self.current_width = cfg.sidebar.width.clone();
+        self.rebuild_display_rows();
     }
 
     pub fn host_window_id(&self) -> Option<&str> {
@@ -508,9 +549,19 @@ impl SidebarApp {
         if self.agents.is_empty() {
             return;
         }
-        let i = self.list_state.selected().unwrap_or(0);
-        let next = if i >= self.agents.len() - 1 { 0 } else { i + 1 };
-        self.list_state.select(Some(next));
+        if self.tree_enabled && !self.display_rows.is_empty() {
+            let i = self.list_state.selected().unwrap_or(0);
+            let next = if i >= self.display_rows.len() - 1 {
+                0
+            } else {
+                i + 1
+            };
+            self.list_state.select(Some(next));
+        } else {
+            let i = self.list_state.selected().unwrap_or(0);
+            let next = if i >= self.agents.len() - 1 { 0 } else { i + 1 };
+            self.list_state.select(Some(next));
+        }
     }
 
     pub fn previous(&mut self) {
@@ -518,28 +569,45 @@ impl SidebarApp {
         if self.agents.is_empty() {
             return;
         }
-        let i = self.list_state.selected().unwrap_or(0);
-        let prev = if i == 0 { self.agents.len() - 1 } else { i - 1 };
-        self.list_state.select(Some(prev));
+        if self.tree_enabled && !self.display_rows.is_empty() {
+            let i = self.list_state.selected().unwrap_or(0);
+            let prev = if i == 0 {
+                self.display_rows.len() - 1
+            } else {
+                i - 1
+            };
+            self.list_state.select(Some(prev));
+        } else {
+            let i = self.list_state.selected().unwrap_or(0);
+            let prev = if i == 0 { self.agents.len() - 1 } else { i - 1 };
+            self.list_state.select(Some(prev));
+        }
     }
 
     pub fn select_first(&mut self) {
         self.selection_mode = SelectionMode::Manual;
-        if !self.agents.is_empty() {
+        if self.tree_enabled && !self.display_rows.is_empty() {
+            self.list_state.select(Some(0));
+        } else if !self.agents.is_empty() {
             self.list_state.select(Some(0));
         }
     }
 
     pub fn select_last(&mut self) {
         self.selection_mode = SelectionMode::Manual;
-        if !self.agents.is_empty() {
+        if self.tree_enabled && !self.display_rows.is_empty() {
+            self.list_state.select(Some(self.display_rows.len() - 1));
+        } else if !self.agents.is_empty() {
             self.list_state.select(Some(self.agents.len() - 1));
         }
     }
 
     pub fn select_index(&mut self, idx: usize) {
         self.selection_mode = SelectionMode::Manual;
-        if !self.agents.is_empty() {
+        if self.tree_enabled && !self.display_rows.is_empty() {
+            self.list_state
+                .select(Some(idx.min(self.display_rows.len() - 1)));
+        } else if !self.agents.is_empty() {
             self.list_state.select(Some(idx.min(self.agents.len() - 1)));
         }
     }
@@ -555,6 +623,11 @@ impl SidebarApp {
         self.selection_mode = SelectionMode::Manual;
         if let Some(i) = self.list_state.selected() {
             let last = self.agents.len().saturating_sub(1);
+            let last = if self.tree_enabled && !self.display_rows.is_empty() {
+                self.display_rows.len().saturating_sub(1)
+            } else {
+                last
+            };
             self.list_state.select(Some((i + 1).min(last)));
         }
     }
@@ -579,6 +652,23 @@ impl SidebarApp {
         let relative_row = (row - area.y) as usize;
         let offset = self.list_state.offset();
 
+        if self.tree_enabled {
+            if self.layout_mode == SidebarLayoutMode::Compact {
+                let idx = offset + relative_row;
+                return (idx < self.display_rows.len()).then_some(idx);
+            }
+
+            let mut y = 0;
+            for idx in offset..self.display_rows.len() {
+                let h = self.tile_heights.get(idx).copied().unwrap_or(1);
+                if relative_row < y + h {
+                    return Some(idx);
+                }
+                y += h;
+            }
+            return None;
+        }
+
         match self.layout_mode {
             SidebarLayoutMode::Compact => {
                 let idx = offset + relative_row;
@@ -599,6 +689,18 @@ impl SidebarApp {
     }
 
     pub fn start_drag(&mut self, idx: usize) {
+        if self.tree_enabled {
+            self.selection_mode = SelectionMode::Manual;
+            let Some(SidebarDisplayRow::Agent { .. }) = self.display_rows.get(idx) else {
+                return;
+            };
+            self.drag_state = Some(DragState {
+                source_idx: idx,
+                current_idx: idx,
+            });
+            self.list_state.select(Some(idx));
+            return;
+        }
         if idx >= self.agents.len() {
             return;
         }
@@ -611,6 +713,10 @@ impl SidebarApp {
     }
 
     pub fn update_drag(&mut self, idx: usize) {
+        if self.tree_enabled {
+            self.update_tree_drag(idx);
+            return;
+        }
         let Some(mut drag_state) = self.drag_state else {
             return;
         };
@@ -622,6 +728,103 @@ impl SidebarApp {
         drag_state.current_idx = idx;
         self.drag_state = Some(drag_state);
         self.list_state.select(Some(idx));
+    }
+
+    fn update_tree_drag(&mut self, idx: usize) {
+        let Some(mut drag_state) = self.drag_state else {
+            return;
+        };
+        if idx == drag_state.current_idx || idx >= self.display_rows.len() {
+            return;
+        }
+        let Some((source_agent_idx, source_group_key)) =
+            self.tree_agent_and_group(drag_state.current_idx)
+        else {
+            return;
+        };
+        let Some((target_agent_idx, target_group_key)) = self.tree_agent_and_group(idx) else {
+            return;
+        };
+        if source_group_key != target_group_key {
+            return;
+        }
+
+        let dragged_pane_id = self.agents[source_agent_idx].pane_id.clone();
+        let Some(new_order) = self.tree_reordered_agent_indices(
+            &source_group_key,
+            source_agent_idx,
+            target_agent_idx,
+        ) else {
+            return;
+        };
+        let old_agents = self.agents.clone();
+        self.agents = new_order
+            .into_iter()
+            .filter_map(|agent_idx| old_agents.get(agent_idx).cloned())
+            .collect();
+        self.rebuild_display_rows();
+        let new_agent_idx = self
+            .agents
+            .iter()
+            .position(|agent| agent.pane_id == dragged_pane_id)
+            .unwrap_or(source_agent_idx);
+        drag_state.current_idx = self.display_row_for_agent_idx(new_agent_idx).unwrap_or(idx);
+        self.drag_state = Some(drag_state);
+        self.list_state.select(Some(drag_state.current_idx));
+    }
+
+    fn tree_reordered_agent_indices(
+        &self,
+        group_key: &str,
+        source_agent_idx: usize,
+        target_agent_idx: usize,
+    ) -> Option<Vec<usize>> {
+        let mut group_slots = Vec::new();
+        for (agent_idx, agent) in self.agents.iter().enumerate() {
+            let (key, _) = tree_group_for_agent(agent, self.tree_group_by, &self.window_prefix);
+            if key == group_key {
+                group_slots.push(agent_idx);
+            }
+        }
+
+        let source_pos = group_slots
+            .iter()
+            .position(|idx| *idx == source_agent_idx)?;
+        let target_pos = group_slots
+            .iter()
+            .position(|idx| *idx == target_agent_idx)?;
+        let moved = group_slots.remove(source_pos);
+        group_slots.insert(target_pos, moved);
+
+        let mut next_order: Vec<usize> = (0..self.agents.len()).collect();
+        for (slot, agent_idx) in self
+            .agents
+            .iter()
+            .enumerate()
+            .filter_map(|(agent_idx, agent)| {
+                let (key, _) = tree_group_for_agent(agent, self.tree_group_by, &self.window_prefix);
+                (key == group_key).then_some(agent_idx)
+            })
+            .zip(group_slots)
+        {
+            next_order[slot] = agent_idx;
+        }
+
+        Some(next_order)
+    }
+
+    fn tree_agent_and_group(&self, row_idx: usize) -> Option<(usize, String)> {
+        let SidebarDisplayRow::Agent { agent_idx, .. } = self.display_rows.get(row_idx)? else {
+            return None;
+        };
+        let group_key = self.display_rows[..row_idx].iter().rev().find_map(|row| {
+            if let SidebarDisplayRow::Group { key, .. } = row {
+                Some(key.clone())
+            } else {
+                None
+            }
+        })?;
+        Some((*agent_idx, group_key))
     }
 
     pub fn cancel_drag(&mut self) {
@@ -664,6 +867,66 @@ impl SidebarApp {
         }
     }
 
+    pub fn selected_agent_idx(&self) -> Option<usize> {
+        let selected = self.list_state.selected()?;
+        if self.tree_enabled {
+            match self.display_rows.get(selected)? {
+                SidebarDisplayRow::Agent { agent_idx, .. } => Some(*agent_idx),
+                SidebarDisplayRow::Group { .. } => None,
+            }
+        } else {
+            Some(selected)
+        }
+    }
+
+    pub fn display_row_for_agent_idx(&self, agent_idx: usize) -> Option<usize> {
+        if !self.tree_enabled {
+            return Some(agent_idx);
+        }
+        self.display_rows.iter().position(|row| {
+            matches!(row, SidebarDisplayRow::Agent { agent_idx: idx, .. } if *idx == agent_idx)
+        })
+    }
+
+    pub fn visible_row_count(&self) -> usize {
+        if self.tree_enabled {
+            self.display_rows.len()
+        } else {
+            self.agents.len()
+        }
+    }
+
+    fn toggle_group_if_selected(&mut self, row_idx: usize) -> bool {
+        let Some(SidebarDisplayRow::Group { key, .. }) = self.display_rows.get(row_idx) else {
+            return false;
+        };
+        let key = key.clone();
+        if !self.collapsed_tree_groups.insert(key.clone()) {
+            self.collapsed_tree_groups.remove(&key);
+        }
+        self.rebuild_display_rows();
+        self.list_state
+            .select(Some(row_idx.min(self.display_rows.len().saturating_sub(1))));
+        true
+    }
+
+    pub fn toggle_selected_group(&mut self) {
+        if let Some(row_idx) = self.list_state.selected() {
+            self.toggle_group_if_selected(row_idx);
+        }
+    }
+
+    fn rebuild_display_rows(&mut self) {
+        self.display_rows = build_display_rows(
+            &self.agents,
+            self.tree_enabled,
+            self.tree_group_by,
+            &self.collapsed_tree_groups,
+            &self.sleeping_pane_ids,
+            &self.window_prefix,
+        );
+    }
+
     /// Height in rows of a tile-mode item at the given index.
     /// Uses cached heights from the last render pass.
     fn tile_item_height(&self, idx: usize) -> usize {
@@ -679,7 +942,7 @@ impl SidebarApp {
     }
 
     pub fn jump_to_selected(&mut self) {
-        if let Some(idx) = self.list_state.selected()
+        if let Some(idx) = self.selected_agent_idx()
             && let Some(agent) = self.agents.get(idx)
         {
             let pane_id = agent.pane_id.clone();
@@ -687,6 +950,15 @@ impl SidebarApp {
             // Signal daemon directly to bypass tmux hook round-trip latency
             super::daemon_ctrl::signal_daemon();
         }
+    }
+
+    pub fn activate_selected(&mut self) {
+        if let Some(idx) = self.list_state.selected()
+            && self.toggle_group_if_selected(idx)
+        {
+            return;
+        }
+        self.jump_to_selected();
     }
 
     pub fn toggle_layout_mode(&mut self) {
@@ -720,8 +992,7 @@ impl SidebarApp {
     /// toggles from different sidebar clients don't clobber each other.
     pub fn toggle_sleeping(&mut self) {
         let Some(pane_id) = self
-            .list_state
-            .selected()
+            .selected_agent_idx()
             .and_then(|i| self.agents.get(i))
             .map(|a| a.pane_id.clone())
         else {
@@ -912,6 +1183,104 @@ impl SidebarApp {
             window,
             agent.window_cmd.as_deref(),
         )
+    }
+}
+
+fn build_display_rows(
+    agents: &[AgentPane],
+    tree_enabled: bool,
+    group_by: SidebarTreeGroupBy,
+    collapsed: &HashSet<String>,
+    sleeping_pane_ids: &HashSet<String>,
+    window_prefix: &str,
+) -> Vec<SidebarDisplayRow> {
+    if !tree_enabled {
+        return agents
+            .iter()
+            .enumerate()
+            .map(|(agent_idx, _)| SidebarDisplayRow::Agent {
+                agent_idx,
+                depth: 0,
+            })
+            .collect();
+    }
+
+    let mut groups: Vec<(String, String, Vec<usize>, usize)> = Vec::new();
+    let mut group_index = BTreeMap::new();
+
+    for (idx, agent) in agents.iter().enumerate() {
+        let (key, label) = tree_group_for_agent(agent, group_by, window_prefix);
+        let group_idx = if let Some(group_idx) = group_index.get(&key).copied() {
+            group_idx
+        } else {
+            let group_idx = groups.len();
+            group_index.insert(key.clone(), group_idx);
+            groups.push((key, label, Vec::new(), 0));
+            group_idx
+        };
+        groups[group_idx].2.push(idx);
+        if sleeping_pane_ids.contains(&agent.pane_id) {
+            groups[group_idx].3 += 1;
+        }
+    }
+
+    let mut rows = Vec::new();
+    for (key, label, agent_indices, sleeping_count) in groups {
+        let expanded = !collapsed.contains(&key);
+        rows.push(SidebarDisplayRow::Group {
+            key,
+            label,
+            agent_count: agent_indices.len(),
+            sleeping_count,
+            expanded,
+        });
+        if expanded {
+            rows.extend(
+                agent_indices
+                    .into_iter()
+                    .map(|agent_idx| SidebarDisplayRow::Agent {
+                        agent_idx,
+                        depth: 1,
+                    }),
+            );
+        }
+    }
+
+    rows
+}
+
+fn tree_group_for_agent(
+    agent: &AgentPane,
+    group_by: SidebarTreeGroupBy,
+    window_prefix: &str,
+) -> (String, String) {
+    let raw = match group_by {
+        SidebarTreeGroupBy::Project => extract_project_name(&agent.path),
+        SidebarTreeGroupBy::Session => strip_workmux_prefix(&agent.session, window_prefix),
+        SidebarTreeGroupBy::Window => strip_workmux_prefix(&agent.window_name, window_prefix),
+    };
+    let label = if raw.trim().is_empty() {
+        "Ungrouped".to_string()
+    } else {
+        raw
+    };
+    let key = format!("{}:{}", group_by_key(group_by), label);
+    (key, label)
+}
+
+fn strip_workmux_prefix(value: &str, window_prefix: &str) -> String {
+    value
+        .strip_prefix(window_prefix)
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn group_by_key(group_by: SidebarTreeGroupBy) -> &'static str {
+    match group_by {
+        SidebarTreeGroupBy::Project => "project",
+        SidebarTreeGroupBy::Session => "session",
+        SidebarTreeGroupBy::Window => "window",
     }
 }
 
@@ -1119,6 +1488,24 @@ fn try_reparse_templates(
 mod tests {
     use super::*;
     use crate::config::{AgentIconConfig, AgentIconDetails};
+    use std::path::PathBuf;
+
+    fn test_agent(path: &str, pane_id: &str) -> AgentPane {
+        AgentPane {
+            session: "wm-feature".to_string(),
+            window_name: "wm-feature".to_string(),
+            pane_id: pane_id.to_string(),
+            window_id: String::new(),
+            path: PathBuf::from(path),
+            pane_title: None,
+            status: None,
+            status_ts: None,
+            updated_ts: None,
+            window_cmd: None,
+            agent_command: None,
+            agent_kind: None,
+        }
+    }
 
     #[test]
     fn resolved_icons_legacy_string() {
@@ -1130,6 +1517,193 @@ mod tests {
         let r = ResolvedAgentIcons::from_config(Some(&map));
         assert_eq!(r.icons.get("claude").map(String::as_str), Some("C"));
         assert!(r.colors.is_empty());
+    }
+
+    #[test]
+    fn display_rows_group_agents_by_first_seen_project() {
+        let agents = vec![
+            test_agent("/tmp/workmux__worktrees/a", "%1"),
+            test_agent("/tmp/api__worktrees/b", "%2"),
+            test_agent("/tmp/workmux__worktrees/c", "%3"),
+        ];
+
+        let rows = build_display_rows(
+            &agents,
+            true,
+            SidebarTreeGroupBy::Project,
+            &HashSet::new(),
+            &HashSet::new(),
+            "wm-",
+        );
+
+        assert_eq!(
+            rows,
+            vec![
+                SidebarDisplayRow::Group {
+                    key: "project:workmux".to_string(),
+                    label: "workmux".to_string(),
+                    agent_count: 2,
+                    sleeping_count: 0,
+                    expanded: true,
+                },
+                SidebarDisplayRow::Agent {
+                    agent_idx: 0,
+                    depth: 1,
+                },
+                SidebarDisplayRow::Agent {
+                    agent_idx: 2,
+                    depth: 1,
+                },
+                SidebarDisplayRow::Group {
+                    key: "project:api".to_string(),
+                    label: "api".to_string(),
+                    agent_count: 1,
+                    sleeping_count: 0,
+                    expanded: true,
+                },
+                SidebarDisplayRow::Agent {
+                    agent_idx: 1,
+                    depth: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn display_rows_hide_agents_for_collapsed_group() {
+        let agents = vec![
+            test_agent("/tmp/workmux__worktrees/a", "%1"),
+            test_agent("/tmp/workmux__worktrees/b", "%2"),
+        ];
+        let collapsed = HashSet::from(["project:workmux".to_string()]);
+        let sleeping = HashSet::from(["%2".to_string()]);
+
+        let rows = build_display_rows(
+            &agents,
+            true,
+            SidebarTreeGroupBy::Project,
+            &collapsed,
+            &sleeping,
+            "wm-",
+        );
+
+        assert_eq!(
+            rows,
+            vec![SidebarDisplayRow::Group {
+                key: "project:workmux".to_string(),
+                label: "workmux".to_string(),
+                agent_count: 2,
+                sleeping_count: 1,
+                expanded: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn tree_drag_reorders_within_group_only() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.tree_enabled = true;
+        app.tree_group_by = SidebarTreeGroupBy::Project;
+        app.agents = vec![
+            test_agent("/tmp/workmux__worktrees/a", "%1"),
+            test_agent("/tmp/api__worktrees/b", "%2"),
+            test_agent("/tmp/workmux__worktrees/c", "%3"),
+        ];
+        app.rebuild_display_rows();
+
+        // Rows: group(workmux), %1, %3, group(api), %2.
+        app.start_drag(1);
+        app.update_drag(2);
+
+        let panes: Vec<_> = app
+            .agents
+            .iter()
+            .map(|agent| agent.pane_id.as_str())
+            .collect();
+        assert_eq!(panes, vec!["%3", "%2", "%1"]);
+        assert_eq!(app.list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn tree_display_preserves_group_order_after_manual_order_refresh() {
+        let agents = vec![
+            test_agent("/tmp/workmux__worktrees/c", "%3"),
+            test_agent("/tmp/api__worktrees/b", "%2"),
+            test_agent("/tmp/workmux__worktrees/a", "%1"),
+        ];
+
+        let rows = build_display_rows(
+            &agents,
+            true,
+            SidebarTreeGroupBy::Project,
+            &HashSet::new(),
+            &HashSet::new(),
+            "wm-",
+        );
+
+        assert_eq!(
+            rows,
+            vec![
+                SidebarDisplayRow::Group {
+                    key: "project:workmux".to_string(),
+                    label: "workmux".to_string(),
+                    agent_count: 2,
+                    sleeping_count: 0,
+                    expanded: true,
+                },
+                SidebarDisplayRow::Agent {
+                    agent_idx: 0,
+                    depth: 1,
+                },
+                SidebarDisplayRow::Agent {
+                    agent_idx: 2,
+                    depth: 1,
+                },
+                SidebarDisplayRow::Group {
+                    key: "project:api".to_string(),
+                    label: "api".to_string(),
+                    agent_count: 1,
+                    sleeping_count: 0,
+                    expanded: true,
+                },
+                SidebarDisplayRow::Agent {
+                    agent_idx: 1,
+                    depth: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tree_drag_ignores_group_rows_and_cross_group_targets() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.tree_enabled = true;
+        app.tree_group_by = SidebarTreeGroupBy::Project;
+        app.agents = vec![
+            test_agent("/tmp/workmux__worktrees/a", "%1"),
+            test_agent("/tmp/api__worktrees/b", "%2"),
+            test_agent("/tmp/workmux__worktrees/c", "%3"),
+        ];
+        app.rebuild_display_rows();
+
+        app.start_drag(0);
+        assert!(app.drag_state.is_none());
+
+        app.start_drag(1);
+        app.update_drag(4);
+        let panes: Vec<_> = app
+            .agents
+            .iter()
+            .map(|agent| agent.pane_id.as_str())
+            .collect();
+        assert_eq!(panes, vec!["%1", "%2", "%3"]);
+        assert_eq!(app.list_state.selected(), Some(1));
     }
 
     #[test]

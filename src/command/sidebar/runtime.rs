@@ -216,7 +216,8 @@ fn process_event(
                 }
                 (KeyCode::Char('j'), _) | (KeyCode::Down, _) => app.next(),
                 (KeyCode::Char('k'), _) | (KeyCode::Up, _) => app.previous(),
-                (KeyCode::Enter, _) => app.jump_to_selected(),
+                (KeyCode::Enter, _) => app.activate_selected(),
+                (KeyCode::Char(' '), _) => app.toggle_selected_group(),
                 (KeyCode::Char('G'), _) => app.select_last(),
                 (KeyCode::Char('g'), _) => app.select_first(),
                 (KeyCode::Char('v'), _) => app.toggle_layout_mode(),

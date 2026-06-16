@@ -214,6 +214,26 @@ pub struct HorizontalSidebarConfig {
     pub item_width: Option<u16>,
 }
 
+/// Configuration for tree-style sidebar grouping.
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub struct TreeSidebarConfig {
+    /// Whether left sidebar rows are grouped under tree headers.
+    pub enabled: Option<bool>,
+
+    /// Field used for top-level tree groups. Default: project.
+    pub group_by: Option<SidebarTreeGroupBy>,
+}
+
+/// Top-level grouping field for tree-style sidebar rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarTreeGroupBy {
+    #[default]
+    Project,
+    Session,
+    Window,
+}
+
 impl HorizontalSidebarConfig {
     pub fn item_width(&self) -> usize {
         self.item_width.unwrap_or(24).clamp(12, 80) as usize
@@ -242,6 +262,10 @@ pub struct SidebarConfig {
     /// Horizontal bar configuration.
     #[serde(default)]
     pub horizontal: HorizontalSidebarConfig,
+
+    /// Tree grouping configuration for the left sidebar.
+    #[serde(default)]
+    pub tree: TreeSidebarConfig,
 
     /// Custom templates for sidebar rendering.
     pub templates: Option<TemplatesConfig>,
@@ -2393,6 +2417,10 @@ impl Config {
                     .item_width
                     .or(self.sidebar.horizontal.item_width),
             },
+            tree: TreeSidebarConfig {
+                enabled: project.sidebar.tree.enabled.or(self.sidebar.tree.enabled),
+                group_by: project.sidebar.tree.group_by.or(self.sidebar.tree.group_by),
+            },
             templates: project
                 .sidebar
                 .templates
@@ -2992,8 +3020,9 @@ mod tests {
         AgentIconConfig, AgentIconDetails, AllowedDomainDetails, AllowedDomainEntry, Config,
         ContainerConfig, ContainerDevice, ExtraMount, LayoutConfig, LimaConfig, NetworkConfig,
         NetworkPolicy, PaneConfig, SandboxConfig, SandboxRuntime, SandboxTarget, SidebarHeight,
-        SidebarPosition, SidebarWidth, SplitDirection, ToolchainMode, is_agent_command,
-        split_first_token, validate_domain, validate_group_add_entry, validate_layouts_config,
+        SidebarPosition, SidebarTreeGroupBy, SidebarWidth, SplitDirection, ToolchainMode,
+        is_agent_command, split_first_token, validate_domain, validate_group_add_entry,
+        validate_layouts_config,
     };
 
     #[test]
@@ -3114,6 +3143,9 @@ sidebar:
   height: "10%"
   horizontal:
     item_width: 32
+  tree:
+    enabled: true
+    group_by: session
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
 
@@ -3121,6 +3153,11 @@ sidebar:
         assert_eq!(config.sidebar.height, Some(SidebarHeight::Percent(10)));
         assert_eq!(config.sidebar.horizontal.item_width, Some(32));
         assert_eq!(config.sidebar.horizontal.item_width(), 32);
+        assert_eq!(config.sidebar.tree.enabled, Some(true));
+        assert_eq!(
+            config.sidebar.tree.group_by,
+            Some(SidebarTreeGroupBy::Session)
+        );
     }
 
     #[test]
@@ -3133,6 +3170,9 @@ sidebar:
   height: 3
   horizontal:
     item_width: 36
+  tree:
+    enabled: true
+    group_by: project
 "#,
         )
         .unwrap();
@@ -3140,6 +3180,8 @@ sidebar:
             r#"
 sidebar:
   height: 4
+  tree:
+    group_by: window
 "#,
         )
         .unwrap();
@@ -3150,6 +3192,11 @@ sidebar:
         assert_eq!(merged.sidebar.width, Some(SidebarWidth::Absolute(40)));
         assert_eq!(merged.sidebar.height, Some(SidebarHeight::Absolute(4)));
         assert_eq!(merged.sidebar.horizontal.item_width, Some(36));
+        assert_eq!(merged.sidebar.tree.enabled, Some(true));
+        assert_eq!(
+            merged.sidebar.tree.group_by,
+            Some(SidebarTreeGroupBy::Window)
+        );
     }
 
     #[test]

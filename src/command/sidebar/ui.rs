@@ -14,7 +14,7 @@ use crate::multiplexer::{AgentPane, AgentStatus};
 use crate::tmux_style;
 use crate::ui::theme::ThemePalette;
 
-use super::app::{SidebarApp, SidebarLayoutMode};
+use super::app::{SidebarApp, SidebarDisplayRow, SidebarLayoutMode};
 use super::template::TokenId;
 use super::template::context::RowContext;
 use super::template::layout::{
@@ -673,6 +673,45 @@ fn pad_spans_to_width(spans: &mut Vec<Span<'static>>, width: usize, bg: Option<C
     }
 }
 
+fn group_line(
+    app: &SidebarApp,
+    label: &str,
+    agent_count: usize,
+    sleeping_count: usize,
+    expanded: bool,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let marker = if expanded { "▾" } else { "▸" };
+    let summary = if sleeping_count > 0 {
+        format!("{} agents, {} sleeping", agent_count, sleeping_count)
+    } else if agent_count == 1 {
+        "1 agent".to_string()
+    } else {
+        format!("{} agents", agent_count)
+    };
+    let label_width = display_width(label);
+    let fixed_width = display_width(marker) + 1 + 1 + display_width(&summary);
+    let spacer = width.saturating_sub(label_width + fixed_width).max(1);
+    let bg = selected.then_some(app.palette.highlight_row_bg);
+    let mut label_style = Style::default()
+        .fg(app.palette.text)
+        .add_modifier(Modifier::BOLD);
+    let mut dim_style = Style::default().fg(app.palette.dimmed);
+    if let Some(bg) = bg {
+        label_style = label_style.bg(bg);
+        dim_style = dim_style.bg(bg);
+    }
+
+    Line::from(vec![
+        Span::styled(marker.to_string(), dim_style),
+        Span::styled(" ", dim_style),
+        Span::styled(label.to_string(), label_style),
+        Span::styled(" ".repeat(spacer), dim_style),
+        Span::styled(summary, dim_style),
+    ])
+}
+
 fn status_icon_extra_width(ctx: &RowContext<'_>) -> usize {
     if ctx.is_stale
         || matches!(
@@ -690,6 +729,11 @@ fn status_icon_extra_width(ctx: &RowContext<'_>) -> usize {
 fn render_compact_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     if app.agents.is_empty() {
         render_no_agents(f, app, area);
+        return;
+    }
+
+    if app.tree_enabled {
+        render_compact_tree_list(f, app, area);
         return;
     }
 
@@ -742,10 +786,94 @@ fn render_compact_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
+fn render_compact_tree_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let pane_suffixes = compute_pane_suffixes(&app.agents);
+    let selected_idx = app.list_state.selected();
+    let template = app.templates.compact.clone();
+    let width = area.width as usize;
+    let contexts: Vec<_> = app
+        .agents
+        .iter()
+        .enumerate()
+        .map(|(idx, agent)| {
+            RowContext::build(
+                app,
+                agent,
+                idx,
+                &pane_suffixes,
+                now_secs,
+                app.selected_agent_idx(),
+            )
+        })
+        .collect();
+    let status_icon_width = contexts
+        .iter()
+        .map(|ctx| ctx.natural_width(TokenId::StatusIcon))
+        .max()
+        .unwrap_or(0);
+    let render_options =
+        RenderOptions::default().with_field_min_width(TokenId::StatusIcon, status_icon_width);
+
+    let items: Vec<ListItem> = app
+        .display_rows
+        .iter()
+        .enumerate()
+        .map(|(row_idx, row)| match row {
+            SidebarDisplayRow::Group {
+                label,
+                agent_count,
+                sleeping_count,
+                expanded,
+                ..
+            } => ListItem::new(group_line(
+                app,
+                label,
+                *agent_count,
+                *sleeping_count,
+                *expanded,
+                selected_idx == Some(row_idx),
+                width,
+            )),
+            SidebarDisplayRow::Agent { agent_idx, depth } => {
+                let Some(ctx) = contexts.get(*agent_idx) else {
+                    return ListItem::new(Line::raw(""));
+                };
+                let indent = "  ".repeat(*depth);
+                let mut spans = render_line_with_options(ctx, &template, width, &render_options);
+                spans.insert(0, Span::raw(indent));
+
+                if ctx.is_selected {
+                    for span in &mut spans {
+                        if span.style.bg.is_none() {
+                            span.style = span.style.bg(app.palette.highlight_row_bg);
+                        }
+                    }
+                }
+
+                ListItem::new(Line::from(spans))
+            }
+        })
+        .collect();
+
+    let list = List::new(items).highlight_style(Style::default().bg(app.palette.highlight_row_bg));
+
+    f.render_stateful_widget(list, area, &mut app.list_state);
+}
+
 /// Tile layout: variable-height cards per agent with status stripe.
 fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     if app.agents.is_empty() {
         render_no_agents(f, app, area);
+        return;
+    }
+
+    if app.tree_enabled {
+        render_tile_tree_list(f, app, area);
         return;
     }
 
@@ -882,6 +1010,149 @@ fn render_tile_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
     app.tile_heights = tile_heights;
 
     // No highlight_style - background is baked into content lines to avoid highlighting separators
+    let list = List::new(items);
+
+    f.render_stateful_widget(list, area, &mut app.list_state);
+}
+
+fn render_tile_tree_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let sep_width = area.width as usize;
+    let selected_agent_idx = app.selected_agent_idx();
+    let selected_row_idx = app.list_state.selected();
+    let pane_suffixes = compute_pane_suffixes(&app.agents);
+    let tile_templates: Vec<_> = app.templates.tiles.clone();
+    let body_width = (area.width as usize).saturating_sub(8); // tree indent + tile chrome
+    let contexts: Vec<_> = app
+        .agents
+        .iter()
+        .enumerate()
+        .map(|(idx, agent)| {
+            RowContext::build(
+                app,
+                agent,
+                idx,
+                &pane_suffixes,
+                now_secs,
+                selected_agent_idx,
+            )
+        })
+        .collect();
+    let mut row_heights = Vec::new();
+
+    let items: Vec<ListItem> = app
+        .display_rows
+        .iter()
+        .enumerate()
+        .map(|(row_idx, row)| match row {
+            SidebarDisplayRow::Group {
+                label,
+                agent_count,
+                sleeping_count,
+                expanded,
+                ..
+            } => {
+                row_heights.push(1);
+                ListItem::new(group_line(
+                    app,
+                    label,
+                    *agent_count,
+                    *sleeping_count,
+                    *expanded,
+                    selected_row_idx == Some(row_idx),
+                    sep_width,
+                ))
+            }
+            SidebarDisplayRow::Agent { agent_idx, depth } => {
+                let Some(ctx) = contexts.get(*agent_idx) else {
+                    row_heights.push(1);
+                    return ListItem::new(Line::raw(""));
+                };
+                let mut lines = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    "─".repeat(sep_width),
+                    Style::default().fg(app.palette.border),
+                )));
+
+                let stripe_color = if ctx.is_stale {
+                    app.palette.dimmed
+                } else {
+                    ctx.status_color
+                };
+                let mut stripe_bg_style = Style::default().fg(stripe_color);
+                if ctx.is_selected {
+                    stripe_bg_style = stripe_bg_style.bg(app.palette.highlight_row_bg);
+                }
+
+                let icon_cols: usize = ctx
+                    .status_icon_spans
+                    .iter()
+                    .map(|(t, _)| display_width(t))
+                    .sum();
+                let icon_pad = if icon_cols < 2 {
+                    " ".repeat(2 - icon_cols)
+                } else {
+                    String::new()
+                };
+                let indent = "  ".repeat(*depth);
+                let mut visible_lines = 0;
+
+                for (line_idx, template) in tile_templates.iter().enumerate() {
+                    if is_blank_template_line(template) {
+                        continue;
+                    }
+                    visible_lines += 1;
+
+                    let mut line_spans: Vec<Span> = vec![
+                        Span::raw(indent.clone()),
+                        Span::styled("▌ ", stripe_bg_style),
+                    ];
+                    if line_idx == 0 {
+                        for (text, style) in &ctx.status_icon_spans {
+                            line_spans.push(Span::styled(text.clone(), *style));
+                        }
+                        line_spans.push(Span::raw(icon_pad.clone()));
+                    } else {
+                        line_spans.push(Span::raw("  "));
+                    }
+                    line_spans.push(Span::raw(" "));
+                    line_spans.extend(render_line(ctx, template, body_width));
+                    line_spans.push(Span::raw(" "));
+
+                    if ctx.is_selected {
+                        for span in &mut line_spans {
+                            if span.style.bg.is_none() {
+                                span.style = span.style.bg(app.palette.highlight_row_bg);
+                            }
+                        }
+                    }
+
+                    lines.push(Line::from(line_spans));
+                }
+
+                if visible_lines == 0 {
+                    visible_lines = 1;
+                    lines.push(Line::from(vec![
+                        Span::raw(indent),
+                        Span::styled("▌ ", stripe_bg_style),
+                        Span::raw("  "),
+                        Span::raw(" "),
+                        Span::raw(" ".repeat(body_width)),
+                        Span::raw(" "),
+                    ]));
+                }
+
+                row_heights.push(visible_lines + 1);
+                ListItem::new(lines)
+            }
+        })
+        .collect();
+
+    app.tile_heights = row_heights;
     let list = List::new(items);
 
     f.render_stateful_widget(list, area, &mut app.list_state);

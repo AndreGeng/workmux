@@ -289,6 +289,27 @@ mod tests {
     }
 
     #[test]
+    fn manual_order_can_preserve_interleaved_tree_group_slots() {
+        let snapshot = build_with_order(
+            vec![
+                agent_with_pane("/workmux__worktrees/a", "%1", Some(300)),
+                agent_with_pane("/api__worktrees/b", "%2", Some(100)),
+                agent_with_pane("/workmux__worktrees/c", "%3", Some(200)),
+            ],
+            HashMap::new(),
+            HashMap::new(),
+            vec!["%3".to_string(), "%2".to_string(), "%1".to_string()],
+        );
+
+        let panes: Vec<_> = snapshot
+            .agents
+            .iter()
+            .map(|agent| agent.pane_id.as_str())
+            .collect();
+        assert_eq!(panes, vec!["%3", "%2", "%1"]);
+    }
+
+    #[test]
     fn pr_statuses_exclude_main_branch_paths() {
         let path = PathBuf::from("/repo");
         let git = GitStatus {
