@@ -22,6 +22,8 @@ use super::template::layout::{
 };
 use super::template::parser::Token;
 
+const TREE_TILE_CHROME_WIDTH: usize = 2;
+
 /// Compute pane suffixes like " (1)", " (2)" for agents sharing the same window.
 fn compute_pane_suffixes(agents: &[AgentPane]) -> Vec<String> {
     let mut counts: HashMap<(&str, &str), usize> = HashMap::new();
@@ -682,7 +684,7 @@ fn group_line(
     selected: bool,
     width: usize,
 ) -> Line<'static> {
-    let marker = if expanded { "▾" } else { "▸" };
+    let marker = if expanded { "[-]" } else { "[+]" };
     let summary = if sleeping_count > 0 {
         format!("{} agents, {} sleeping", agent_count, sleeping_count)
     } else if agent_count == 1 {
@@ -794,30 +796,15 @@ fn render_compact_tree_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
 
     let pane_suffixes = compute_pane_suffixes(&app.agents);
     let selected_idx = app.list_state.selected();
-    let template = app.templates.compact.clone();
+    let template = remove_blank_status_prefix(&app.templates.compact);
     let width = area.width as usize;
     let contexts: Vec<_> = app
         .agents
         .iter()
         .enumerate()
-        .map(|(idx, agent)| {
-            RowContext::build(
-                app,
-                agent,
-                idx,
-                &pane_suffixes,
-                now_secs,
-                app.selected_agent_idx(),
-            )
-        })
+        .map(|(idx, agent)| RowContext::build(app, agent, idx, &pane_suffixes, now_secs, None))
         .collect();
-    let status_icon_width = contexts
-        .iter()
-        .map(|ctx| ctx.natural_width(TokenId::StatusIcon))
-        .max()
-        .unwrap_or(0);
-    let render_options =
-        RenderOptions::default().with_field_min_width(TokenId::StatusIcon, status_icon_width);
+    let render_options = RenderOptions::default();
 
     let items: Vec<ListItem> = app
         .display_rows
@@ -843,11 +830,12 @@ fn render_compact_tree_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                 let Some(ctx) = contexts.get(*agent_idx) else {
                     return ListItem::new(Line::raw(""));
                 };
-                let indent = "  ".repeat(*depth);
+                let row_selected = selected_idx == Some(row_idx);
+                let indent = " ".repeat(*depth);
                 let mut spans = render_line_with_options(ctx, &template, width, &render_options);
                 spans.insert(0, Span::raw(indent));
 
-                if ctx.is_selected {
+                if row_selected {
                     for span in &mut spans {
                         if span.style.bg.is_none() {
                             span.style = span.style.bg(app.palette.highlight_row_bg);
@@ -1022,25 +1010,15 @@ fn render_tile_tree_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
         .as_secs();
 
     let sep_width = area.width as usize;
-    let selected_agent_idx = app.selected_agent_idx();
     let selected_row_idx = app.list_state.selected();
     let pane_suffixes = compute_pane_suffixes(&app.agents);
     let tile_templates: Vec<_> = app.templates.tiles.clone();
-    let body_width = (area.width as usize).saturating_sub(8); // tree indent + tile chrome
+    let body_width = (area.width as usize).saturating_sub(TREE_TILE_CHROME_WIDTH);
     let contexts: Vec<_> = app
         .agents
         .iter()
         .enumerate()
-        .map(|(idx, agent)| {
-            RowContext::build(
-                app,
-                agent,
-                idx,
-                &pane_suffixes,
-                now_secs,
-                selected_agent_idx,
-            )
-        })
+        .map(|(idx, agent)| RowContext::build(app, agent, idx, &pane_suffixes, now_secs, None))
         .collect();
     let mut row_heights = Vec::new();
 
@@ -1072,58 +1050,28 @@ fn render_tile_tree_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                     row_heights.push(1);
                     return ListItem::new(Line::raw(""));
                 };
+                let row_selected = selected_row_idx == Some(row_idx);
                 let mut lines = Vec::new();
                 lines.push(Line::from(Span::styled(
                     "─".repeat(sep_width),
                     Style::default().fg(app.palette.border),
                 )));
 
-                let stripe_color = if ctx.is_stale {
-                    app.palette.dimmed
-                } else {
-                    ctx.status_color
-                };
-                let mut stripe_bg_style = Style::default().fg(stripe_color);
-                if ctx.is_selected {
-                    stripe_bg_style = stripe_bg_style.bg(app.palette.highlight_row_bg);
-                }
-
-                let icon_cols: usize = ctx
-                    .status_icon_spans
-                    .iter()
-                    .map(|(t, _)| display_width(t))
-                    .sum();
-                let icon_pad = if icon_cols < 2 {
-                    " ".repeat(2 - icon_cols)
-                } else {
-                    String::new()
-                };
-                let indent = "  ".repeat(*depth);
+                let indent = " ".repeat(*depth);
                 let mut visible_lines = 0;
 
-                for (line_idx, template) in tile_templates.iter().enumerate() {
+                for template in &tile_templates {
                     if is_blank_template_line(template) {
                         continue;
                     }
                     visible_lines += 1;
 
-                    let mut line_spans: Vec<Span> = vec![
-                        Span::raw(indent.clone()),
-                        Span::styled("▌ ", stripe_bg_style),
-                    ];
-                    if line_idx == 0 {
-                        for (text, style) in &ctx.status_icon_spans {
-                            line_spans.push(Span::styled(text.clone(), *style));
-                        }
-                        line_spans.push(Span::raw(icon_pad.clone()));
-                    } else {
-                        line_spans.push(Span::raw("  "));
-                    }
+                    let mut line_spans: Vec<Span> = vec![Span::raw(indent.clone())];
                     line_spans.push(Span::raw(" "));
                     line_spans.extend(render_line(ctx, template, body_width));
                     line_spans.push(Span::raw(" "));
 
-                    if ctx.is_selected {
+                    if row_selected {
                         for span in &mut line_spans {
                             if span.style.bg.is_none() {
                                 span.style = span.style.bg(app.palette.highlight_row_bg);
@@ -1138,7 +1086,6 @@ fn render_tile_tree_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                     visible_lines = 1;
                     lines.push(Line::from(vec![
                         Span::raw(indent),
-                        Span::styled("▌ ", stripe_bg_style),
                         Span::raw("  "),
                         Span::raw(" "),
                         Span::raw(" ".repeat(body_width)),
@@ -1146,7 +1093,18 @@ fn render_tile_tree_list(f: &mut Frame, app: &mut SidebarApp, area: Rect) {
                     ]));
                 }
 
-                row_heights.push(visible_lines + 1);
+                let is_group_end = app
+                    .display_rows
+                    .get(row_idx + 1)
+                    .is_none_or(|next| matches!(next, SidebarDisplayRow::Group { .. }));
+                if is_group_end {
+                    lines.push(Line::from(Span::styled(
+                        "─".repeat(sep_width),
+                        Style::default().fg(app.palette.border),
+                    )));
+                }
+
+                row_heights.push(visible_lines + 1 + usize::from(is_group_end));
                 ListItem::new(lines)
             }
         })
@@ -1215,7 +1173,7 @@ pub(crate) fn status_icon_and_style(
         }
         None => {
             let style = Style::default().fg(app.palette.dimmed);
-            (vec![("  ".to_string(), style)], style)
+            (vec![("○".to_string(), style)], style)
         }
     }
 }
@@ -1267,10 +1225,13 @@ pub(crate) fn display_width(s: &str) -> usize {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use std::path::PathBuf;
 
     use super::*;
     use crate::agent_display::{sanitize_pane_title, strip_oc_title_prefix};
     use crate::command::sidebar::app::TemplateError;
+    use crate::config::SidebarPosition;
+    use crate::multiplexer::AgentPane;
 
     #[test]
     fn render_sidebar_shows_template_error_warning() {
@@ -1335,6 +1296,335 @@ mod tests {
         assert_eq!(
             sanitize_pane_title(Some("⠋⠙ OC | Investigating..."), "worktree", "project"),
             Some("Investigating...")
+        );
+    }
+
+    #[test]
+    fn no_status_renders_hollow_circle() {
+        let app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+
+        let (spans, _) = status_icon_and_style(&app, None, false);
+
+        assert_eq!(spans.first().map(|(text, _)| text.as_str()), Some("○"));
+    }
+
+    #[test]
+    fn tree_tiles_do_not_render_left_status_stripe() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "tiles[0]".to_string(),
+            message: "test".to_string(),
+        });
+        app.template_error = None;
+        app.layout_mode = SidebarLayoutMode::Tiles;
+        app.position = SidebarPosition::Left;
+        app.tree_enabled = true;
+        app.agents = vec![AgentPane {
+            session: "wm-feature".to_string(),
+            window_name: "wm-feature".to_string(),
+            pane_id: "%1".to_string(),
+            window_id: "@1".to_string(),
+            path: PathBuf::from("/tmp/workmux__worktrees/feature"),
+            pane_title: None,
+            status: None,
+            status_ts: None,
+            updated_ts: None,
+            window_cmd: None,
+            agent_command: None,
+            agent_kind: None,
+        }];
+        app.display_rows = vec![
+            SidebarDisplayRow::Group {
+                key: "project:workmux".to_string(),
+                label: "workmux".to_string(),
+                agent_count: 1,
+                sleeping_count: 0,
+                expanded: true,
+            },
+            SidebarDisplayRow::Agent {
+                agent_idx: 0,
+                depth: 1,
+            },
+        ];
+
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..8)
+            .flat_map(|y| (0..40).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(!text.contains('▌'));
+        assert!(!text.contains('○'));
+    }
+
+    #[test]
+    fn tile_tree_draws_separator_after_group_items_not_header() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "tiles[0]".to_string(),
+            message: "test".to_string(),
+        });
+        app.template_error = None;
+        app.layout_mode = SidebarLayoutMode::Tiles;
+        app.position = SidebarPosition::Left;
+        app.tree_enabled = true;
+        app.agents = vec![AgentPane {
+            session: "wm-feature".to_string(),
+            window_name: "wm-feature".to_string(),
+            pane_id: "%1".to_string(),
+            window_id: "@1".to_string(),
+            path: PathBuf::from("/tmp/workmux__worktrees/feature"),
+            pane_title: None,
+            status: None,
+            status_ts: None,
+            updated_ts: None,
+            window_cmd: None,
+            agent_command: None,
+            agent_kind: None,
+        }];
+        app.display_rows = vec![
+            SidebarDisplayRow::Group {
+                key: "project:workmux".to_string(),
+                label: "workmux".to_string(),
+                agent_count: 1,
+                sleeping_count: 0,
+                expanded: true,
+            },
+            SidebarDisplayRow::Agent {
+                agent_idx: 0,
+                depth: 1,
+            },
+        ];
+
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let header_line = (0..40).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        let first_item_top_separator = (0..40).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+        let group_end_separator = (0..40).map(|x| buffer[(x, 3)].symbol()).collect::<String>();
+        assert!(!header_line.contains('─'));
+        assert!(first_item_top_separator.contains('─'));
+        assert!(group_end_separator.contains('─'));
+    }
+
+    #[test]
+    fn compact_tree_does_not_render_status_icon_column() {
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.template_error = None;
+        app.layout_mode = SidebarLayoutMode::Compact;
+        app.position = SidebarPosition::Left;
+        app.tree_enabled = true;
+        app.agents = vec![AgentPane {
+            session: "wm-feature".to_string(),
+            window_name: "wm-feature".to_string(),
+            pane_id: "%1".to_string(),
+            window_id: "@1".to_string(),
+            path: PathBuf::from("/tmp/workmux__worktrees/feature"),
+            pane_title: None,
+            status: None,
+            status_ts: None,
+            updated_ts: None,
+            window_cmd: None,
+            agent_command: None,
+            agent_kind: None,
+        }];
+        app.display_rows = vec![
+            SidebarDisplayRow::Group {
+                key: "project:workmux".to_string(),
+                label: "workmux".to_string(),
+                agent_count: 1,
+                sleeping_count: 0,
+                expanded: true,
+            },
+            SidebarDisplayRow::Agent {
+                agent_idx: 0,
+                depth: 1,
+            },
+        ];
+
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = (0..5)
+            .flat_map(|y| (0..40).map(move |x| buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(!text.contains('○'));
+    }
+
+    #[test]
+    fn compact_tree_agent_indent_is_one_space_per_depth() {
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.template_error = None;
+        app.layout_mode = SidebarLayoutMode::Compact;
+        app.position = SidebarPosition::Left;
+        app.tree_enabled = true;
+        app.agents = vec![AgentPane {
+            session: "wm-feature".to_string(),
+            window_name: "wm-feature".to_string(),
+            pane_id: "%1".to_string(),
+            window_id: "@1".to_string(),
+            path: PathBuf::from("/tmp/workmux__worktrees/feature"),
+            pane_title: None,
+            status: None,
+            status_ts: None,
+            updated_ts: None,
+            window_cmd: None,
+            agent_command: None,
+            agent_kind: None,
+        }];
+        app.display_rows = vec![
+            SidebarDisplayRow::Group {
+                key: "project:workmux".to_string(),
+                label: "workmux".to_string(),
+                agent_count: 1,
+                sleeping_count: 0,
+                expanded: true,
+            },
+            SidebarDisplayRow::Agent {
+                agent_idx: 0,
+                depth: 1,
+            },
+        ];
+
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let agent_line = (0..40).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+        assert!(agent_line.starts_with("  feature"));
+        assert!(!agent_line.starts_with("   feature"));
+    }
+
+    #[test]
+    fn compact_tree_highlights_selected_display_row_order() {
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.template_error = None;
+        app.layout_mode = SidebarLayoutMode::Compact;
+        app.position = SidebarPosition::Left;
+        app.tree_enabled = true;
+        app.agents = vec![
+            AgentPane {
+                session: "wm-feature".to_string(),
+                window_name: "wm-feature".to_string(),
+                pane_id: "%1".to_string(),
+                window_id: "@1".to_string(),
+                path: PathBuf::from("/tmp/workmux__worktrees/a"),
+                pane_title: None,
+                status: None,
+                status_ts: None,
+                updated_ts: None,
+                window_cmd: None,
+                agent_command: None,
+                agent_kind: None,
+            },
+            AgentPane {
+                session: "wm-feature".to_string(),
+                window_name: "wm-feature".to_string(),
+                pane_id: "%2".to_string(),
+                window_id: "@2".to_string(),
+                path: PathBuf::from("/tmp/api__worktrees/b"),
+                pane_title: None,
+                status: None,
+                status_ts: None,
+                updated_ts: None,
+                window_cmd: None,
+                agent_command: None,
+                agent_kind: None,
+            },
+            AgentPane {
+                session: "wm-feature".to_string(),
+                window_name: "wm-feature".to_string(),
+                pane_id: "%3".to_string(),
+                window_id: "@3".to_string(),
+                path: PathBuf::from("/tmp/workmux__worktrees/c"),
+                pane_title: None,
+                status: None,
+                status_ts: None,
+                updated_ts: None,
+                window_cmd: None,
+                agent_command: None,
+                agent_kind: None,
+            },
+        ];
+        app.display_rows = vec![
+            SidebarDisplayRow::Group {
+                key: "project:workmux".to_string(),
+                label: "workmux".to_string(),
+                agent_count: 2,
+                sleeping_count: 0,
+                expanded: true,
+            },
+            SidebarDisplayRow::Agent {
+                agent_idx: 0,
+                depth: 1,
+            },
+            SidebarDisplayRow::Agent {
+                agent_idx: 2,
+                depth: 1,
+            },
+            SidebarDisplayRow::Group {
+                key: "project:api".to_string(),
+                label: "api".to_string(),
+                agent_count: 1,
+                sleeping_count: 0,
+                expanded: true,
+            },
+            SidebarDisplayRow::Agent {
+                agent_idx: 1,
+                depth: 1,
+            },
+        ];
+        app.select_index(2);
+
+        terminal.draw(|f| render_sidebar(f, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer[(1, 2)].style().bg,
+            Some(app.palette.highlight_row_bg)
+        );
+        assert_ne!(
+            buffer[(1, 4)].style().bg,
+            Some(app.palette.highlight_row_bg)
+        );
+    }
+
+    #[test]
+    fn tree_group_markers_are_visible_text_controls() {
+        let app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+
+        let expanded = group_line(&app, "workmux", 2, 0, true, false, 30);
+        let collapsed = group_line(&app, "workmux", 2, 0, false, false, 30);
+
+        assert_eq!(
+            expanded.spans.first().map(|span| span.content.as_ref()),
+            Some("[-]")
+        );
+        assert_eq!(
+            collapsed.spans.first().map(|span| span.content.as_ref()),
+            Some("[+]")
         );
     }
 }

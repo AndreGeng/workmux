@@ -15,13 +15,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cmd::Cmd;
-use crate::config::{Config, SidebarPosition};
+use crate::config::{Config, SidebarPosition, SidebarTreeGroupBy};
 use crate::git::GitStatus;
 use crate::github::PrSummary;
 use crate::multiplexer::{Multiplexer, create_backend, detect_backend};
 use crate::state::StateStore;
 
-use super::app::SidebarLayoutMode;
+use super::app::{self, SidebarLayoutMode};
 use super::snapshot::{PrPathEntry, build_snapshot};
 
 /// Compute socket path from instance_id.
@@ -246,6 +246,41 @@ fn read_manual_order() -> Vec<String> {
         .and_then(|store| store.load_settings())
         .map(|settings| settings.sidebar_order)
         .unwrap_or_default()
+}
+
+fn agent_list_for_navigation(agents: &[crate::multiplexer::AgentPane], config: &Config) -> String {
+    let tree_enabled = config.sidebar.tree.enabled.unwrap_or(false);
+    if !tree_enabled {
+        return agents
+            .iter()
+            .map(|a| a.pane_id.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    let group_by = config
+        .sidebar
+        .tree
+        .group_by
+        .unwrap_or(SidebarTreeGroupBy::Project);
+    let window_prefix = config.window_prefix.as_deref().unwrap_or("wm-");
+    app::build_display_rows(
+        agents,
+        true,
+        group_by,
+        &HashSet::new(),
+        &HashSet::new(),
+        window_prefix,
+    )
+    .into_iter()
+    .filter_map(|row| match row {
+        app::SidebarDisplayRow::Agent { agent_idx, .. } => {
+            agents.get(agent_idx).map(|agent| agent.pane_id.as_str())
+        }
+        app::SidebarDisplayRow::Group { .. } => None,
+    })
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 /// Shared git status cache, updated by a background worker thread.
@@ -1558,13 +1593,10 @@ pub fn run() -> Result<()> {
                 last_config_dirs = config_dirs;
             }
 
-            let agent_list: String = output
-                .snapshot
-                .agents
-                .iter()
-                .map(|a| a.pane_id.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
+            let agent_list = {
+                let config = config.lock().unwrap();
+                agent_list_for_navigation(&output.snapshot.agents, &config)
+            };
 
             if agent_list != last_agent_list {
                 if !agent_list.is_empty() {
@@ -1822,6 +1854,30 @@ mod tests {
             status: Some(AgentStatus::Done),
             ..working_agent(pane_id, 1)
         }
+    }
+
+    fn tree_agent(path: &str, pane_id: &str) -> AgentPane {
+        AgentPane {
+            path: PathBuf::from(path),
+            status: None,
+            status_ts: None,
+            updated_ts: None,
+            ..working_agent(pane_id, 1)
+        }
+    }
+
+    #[test]
+    fn agent_list_for_navigation_uses_tree_display_order() {
+        let mut config = Config::default();
+        config.sidebar.tree.enabled = Some(true);
+        config.sidebar.tree.group_by = Some(SidebarTreeGroupBy::Project);
+        let agents = vec![
+            tree_agent("/tmp/workmux__worktrees/a", "%1"),
+            tree_agent("/tmp/api__worktrees/b", "%2"),
+            tree_agent("/tmp/workmux__worktrees/c", "%3"),
+        ];
+
+        assert_eq!(agent_list_for_navigation(&agents, &config), "%1 %3 %2");
     }
 
     #[test]

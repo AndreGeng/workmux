@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tracing::{info, trace, warn};
 
 use super::types::{AgentState, GlobalSettings, PaneKey};
@@ -378,6 +379,7 @@ impl StateStore {
         let current_boot_id = mux.server_boot_id().unwrap_or(None);
 
         let mut valid_agents = Vec::new();
+        let mut reconciled_pane_ids = HashSet::new();
         let backend = mux.name();
         let instance = mux.instance_id();
 
@@ -399,6 +401,7 @@ impl StateStore {
                             state.session_name.clone().unwrap_or_default(),
                             state.window_name.clone().unwrap_or_default(),
                         );
+                        reconciled_pane_ids.insert(agent_pane.pane_id.clone());
                         valid_agents.push(agent_pane);
                     } else if state.boot_id.is_some() && state.boot_id != current_boot_id {
                         // Server restarted since this state was written. Preserve
@@ -444,6 +447,57 @@ impl StateStore {
                             pane_id,
                             "reconcile: preserving agent from previous server lifecycle for resurrect"
                         );
+                    } else if state.status == Some(crate::multiplexer::AgentStatus::Working)
+                        && crate::agent_identity::classify_agent_kind(
+                            live.current_command.as_deref(),
+                            live.title.as_deref(),
+                        )
+                        .is_some()
+                    {
+                        let mut updated_state = state;
+                        if let Some(command) = live.current_command.clone() {
+                            updated_state.command = command;
+                        }
+                        updated_state.workdir = live.working_dir.clone();
+                        updated_state.pane_title = live.title.clone().or(updated_state.pane_title);
+                        updated_state.window_name =
+                            live.window.clone().or(updated_state.window_name);
+                        updated_state.session_name =
+                            live.session.clone().or(updated_state.session_name);
+                        if let Some(pid) = live.pid {
+                            updated_state.pane_pid = pid;
+                        }
+                        if updated_state.agent_kind.is_none() {
+                            updated_state.agent_kind = crate::agent_identity::classify_agent_kind(
+                                updated_state.command.as_str().into(),
+                                updated_state.pane_title.as_deref(),
+                            );
+                        }
+                        self.upsert_agent(&updated_state)?;
+                        let mut agent_pane = updated_state.to_agent_pane(
+                            live.session.clone().unwrap_or_else(|| {
+                                updated_state.session_name.clone().unwrap_or_default()
+                            }),
+                            live.window.clone().unwrap_or_else(|| {
+                                updated_state.window_name.clone().unwrap_or_default()
+                            }),
+                        );
+                        if live.title.is_some() {
+                            agent_pane.pane_title = live.title.clone();
+                        }
+                        if backend == "tmux" {
+                            if live
+                                .window
+                                .as_ref()
+                                .is_some_and(|window| auto_renamed_tmux_windows.contains(window))
+                            {
+                                agent_pane.window_cmd = live.window.clone();
+                            } else {
+                                agent_pane.window_cmd = live.current_command.clone();
+                            }
+                        }
+                        reconciled_pane_ids.insert(agent_pane.pane_id.clone());
+                        valid_agents.push(agent_pane);
                     } else {
                         // Command changed - agent exited (e.g., "node" -> "zsh")
                         info!(
@@ -484,12 +538,234 @@ impl StateStore {
                         }
                     }
                     valid_agents.push(agent_pane);
+                    reconciled_pane_ids.insert(state.pane_key.pane_id);
                 }
+            }
+        }
+
+        for (pane_id, live) in &live_panes {
+            if reconciled_pane_ids.contains(pane_id) {
+                continue;
+            }
+            if let Some(agent_pane) =
+                live_agent_pane_from_info(pane_id, live, backend, &auto_renamed_tmux_windows)
+            {
+                valid_agents.push(agent_pane);
             }
         }
 
         Ok(valid_agents)
     }
+}
+
+fn live_agent_pane_from_info(
+    pane_id: &str,
+    live: &crate::multiplexer::LivePaneInfo,
+    backend: &str,
+    auto_renamed_tmux_windows: &HashSet<String>,
+) -> Option<crate::multiplexer::AgentPane> {
+    let agent_kind = classify_live_agent_kind(live)?;
+
+    let window_cmd = if backend == "tmux" {
+        if live
+            .window
+            .as_ref()
+            .is_some_and(|window| auto_renamed_tmux_windows.contains(window))
+        {
+            live.window.clone()
+        } else {
+            live.current_command.clone()
+        }
+    } else {
+        None
+    };
+
+    Some(crate::multiplexer::AgentPane {
+        session: live.session.clone().unwrap_or_default(),
+        window_name: live.window.clone().unwrap_or_default(),
+        pane_id: pane_id.to_string(),
+        window_id: String::new(),
+        path: live.working_dir.clone(),
+        pane_title: live.title.clone(),
+        status: None,
+        status_ts: None,
+        updated_ts: None,
+        window_cmd,
+        agent_command: live.current_command.clone(),
+        agent_kind: Some(agent_kind),
+    })
+}
+
+fn classify_live_agent_kind(live: &crate::multiplexer::LivePaneInfo) -> Option<String> {
+    if let Some(agent_kind) = classify_live_agent_command(live.current_command.as_deref()) {
+        return Some(agent_kind);
+    }
+
+    if let Some(agent_kind) = live_agent_child_process_kind(live.pid) {
+        return Some(agent_kind);
+    }
+
+    let agent_kind = crate::agent_identity::classify_agent_kind(
+        live.current_command.as_deref(),
+        live.title.as_deref(),
+    )?;
+
+    if is_shell_command(live.current_command.as_deref())
+        && !live_agent_child_process_exists(live.pid, &agent_kind)
+    {
+        return None;
+    }
+
+    Some(agent_kind)
+}
+
+fn classify_live_agent_command(command: Option<&str>) -> Option<String> {
+    let command = command?.trim();
+    let token = command.split_whitespace().next().unwrap_or(command);
+    let stem = std::path::Path::new(token)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(token)
+        .to_ascii_lowercase();
+
+    if stem == "opencode" || stem == "opencode-ai" {
+        return Some("opencode".to_string());
+    }
+    if stem == "codex" || stem.starts_with("codex-") {
+        return Some("codex".to_string());
+    }
+    if matches!(
+        stem.as_str(),
+        "claude" | "gemini" | "pi" | "kiro-cli" | "vibe" | "copilot"
+    ) {
+        return Some(stem);
+    }
+    if is_version_like(&stem) {
+        return Some("claude".to_string());
+    }
+
+    None
+}
+
+fn is_shell_command(command: Option<&str>) -> bool {
+    let Some(command) = command else {
+        return false;
+    };
+    let token = command.trim().split_whitespace().next().unwrap_or(command);
+    let stem = std::path::Path::new(token)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(token)
+        .trim_start_matches('-')
+        .to_ascii_lowercase();
+
+    matches!(stem.as_str(), "bash" | "zsh" | "sh" | "fish")
+}
+
+fn live_agent_child_process_exists(pid: Option<u32>, agent_kind: &str) -> bool {
+    live_agent_child_process_kind(pid).as_deref() == Some(agent_kind)
+}
+
+fn live_agent_child_process_kind(pid: Option<u32>) -> Option<String> {
+    let Some(root_pid) = pid else {
+        return None;
+    };
+    let Ok(output) = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+
+    let entries = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_ps_entry)
+        .collect::<Vec<_>>();
+    descendant_agent_kind(root_pid, &entries)
+}
+
+fn parse_ps_entry(line: &str) -> Option<(u32, u32, String)> {
+    let mut parts = line.split_whitespace();
+    let pid = parts.next()?.parse().ok()?;
+    let ppid = parts.next()?.parse().ok()?;
+    let command = parts.collect::<Vec<_>>().join(" ");
+    Some((pid, ppid, command))
+}
+
+fn descendant_agent_kind(root_pid: u32, entries: &[(u32, u32, String)]) -> Option<String> {
+    let mut frontier = vec![root_pid];
+    let mut seen = HashSet::new();
+
+    while let Some(parent_pid) = frontier.pop() {
+        if !seen.insert(parent_pid) {
+            continue;
+        }
+        for (pid, ppid, command) in entries {
+            if *ppid != parent_pid {
+                continue;
+            }
+            if let Some(agent_kind) = command_agent_kind(command) {
+                return Some(agent_kind);
+            }
+            frontier.push(*pid);
+        }
+    }
+
+    None
+}
+
+fn command_agent_kind(command: &str) -> Option<String> {
+    let command = command.to_ascii_lowercase();
+    if command.contains("opencode") {
+        return Some("opencode".to_string());
+    }
+    if command.contains("codex") {
+        return Some("codex".to_string());
+    }
+    if command.ends_with("/pi") || command == "pi" || command.contains("/pi ") {
+        return Some("pi".to_string());
+    }
+    if command.ends_with("/claude") || command == "claude" || command.contains("/claude ") {
+        return Some("claude".to_string());
+    }
+    if command.contains("gemini") {
+        return Some("gemini".to_string());
+    }
+    if command.contains("vibe") {
+        return Some("vibe".to_string());
+    }
+    if command.contains("kiro-cli") {
+        return Some("kiro-cli".to_string());
+    }
+    if command.contains("copilot") {
+        return Some("copilot".to_string());
+    }
+    None
+}
+
+fn is_version_like(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut has_dot = false;
+    let mut prev_dot = true;
+    for ch in value.chars() {
+        if ch == '.' {
+            if prev_dot {
+                return false;
+            }
+            has_dot = true;
+            prev_dot = true;
+        } else if ch.is_ascii_digit() {
+            prev_dot = false;
+        } else {
+            return false;
+        }
+    }
+    has_dot && !prev_dot
 }
 
 fn tmux_auto_renamed_windows(
@@ -934,6 +1210,126 @@ mod tests {
         let auto_renamed = tmux_auto_renamed_windows(&live_panes);
         assert!(auto_renamed.contains("node"));
         assert!(!auto_renamed.contains("user-name"));
+    }
+
+    #[test]
+    fn live_agent_pane_from_info_detects_manual_agent_pane() {
+        let live = LivePaneInfo {
+            pid: Some(42),
+            current_command: Some("claude".to_string()),
+            working_dir: PathBuf::from("/repo"),
+            title: Some("Claude Code".to_string()),
+            session: Some("work".to_string()),
+            window: Some("manual".to_string()),
+        };
+
+        let pane = live_agent_pane_from_info("%9", &live, "tmux", &HashSet::new()).unwrap();
+
+        assert_eq!(pane.pane_id, "%9");
+        assert_eq!(pane.path, PathBuf::from("/repo"));
+        assert_eq!(pane.status, None);
+        assert_eq!(pane.agent_kind.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn live_agent_pane_from_info_detects_opencode_and_codex_commands() {
+        let opencode = LivePaneInfo {
+            pid: Some(42),
+            current_command: Some("opencode".to_string()),
+            working_dir: PathBuf::from("/repo"),
+            title: Some("OC | working".to_string()),
+            session: Some("work".to_string()),
+            window: Some("manual".to_string()),
+        };
+        let codex = LivePaneInfo {
+            current_command: Some("codex-aarch64-a".to_string()),
+            title: Some("codex".to_string()),
+            ..opencode.clone()
+        };
+
+        assert_eq!(
+            live_agent_pane_from_info("%9", &opencode, "tmux", &HashSet::new())
+                .unwrap()
+                .agent_kind
+                .as_deref(),
+            Some("opencode")
+        );
+        assert_eq!(
+            live_agent_pane_from_info("%10", &codex, "tmux", &HashSet::new())
+                .unwrap()
+                .agent_kind
+                .as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn descendants_contain_agent_detects_shell_wrapped_opencode() {
+        let entries = vec![
+            (100, 1, "zsh".to_string()),
+            (101, 100, "/bin/sh".to_string()),
+            (
+                102,
+                101,
+                "/Users/mac/.pnpm-global/global/5/.pnpm/opencode-ai/bin/opencode.exe".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            descendant_agent_kind(100, &entries).as_deref(),
+            Some("opencode")
+        );
+    }
+
+    #[test]
+    fn descendant_agent_kind_detects_node_wrapped_codex() {
+        let entries = vec![
+            (100, 1, "zsh".to_string()),
+            (
+                101,
+                100,
+                "node /Users/mac/.pnpm-global/global/5/.pnpm/@openai+codex/bin/codex.js"
+                    .to_string(),
+            ),
+            (
+                102,
+                101,
+                "/Users/mac/.pnpm-global/global/5/.pnpm/@openai+codex/vendor/bin/codex".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            descendant_agent_kind(100, &entries).as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn shell_title_classification_requires_live_agent_child() {
+        let live = LivePaneInfo {
+            pid: Some(999_999),
+            current_command: Some("bash".to_string()),
+            working_dir: PathBuf::from("/repo"),
+            title: Some("OC | working".to_string()),
+            session: Some("work".to_string()),
+            window: Some("manual".to_string()),
+        };
+
+        assert_eq!(classify_live_agent_kind(&live), None);
+    }
+
+    #[test]
+    fn live_agent_pane_from_info_ignores_shell_even_with_stale_agent_title() {
+        let live = LivePaneInfo {
+            pid: Some(42),
+            current_command: Some("zsh".to_string()),
+            working_dir: PathBuf::from("/repo"),
+            title: Some("OC | previous task".to_string()),
+            session: Some("work".to_string()),
+            window: Some("manual".to_string()),
+        };
+
+        assert!(live_agent_pane_from_info("%9", &live, "tmux", &HashSet::new()).is_none());
     }
 
     #[test]

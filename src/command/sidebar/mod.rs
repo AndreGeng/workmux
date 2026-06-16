@@ -780,8 +780,10 @@ pub fn navigate(action: NavAction) -> Result<()> {
         anyhow::bail!("no sidebar agents found (is the sidebar running?)");
     }
 
-    // Parse space-separated pane IDs
-    let panes: Vec<&str> = agents_str.split_whitespace().collect();
+    let panes: Vec<String> = agents_str
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect();
 
     if panes.is_empty() {
         anyhow::bail!("no sidebar agents found");
@@ -794,7 +796,7 @@ pub fn navigate(action: NavAction) -> Result<()> {
         .unwrap_or_default();
     let current_pane_id = current_pane_id.trim();
 
-    let current_idx = panes.iter().position(|&pid| pid == current_pane_id);
+    let current_idx = panes.iter().position(|pid| pid == current_pane_id);
 
     let len = panes.len();
     let target_idx = match &action {
@@ -804,9 +806,9 @@ pub fn navigate(action: NavAction) -> Result<()> {
             .expect("len > 0 guarantees a result for Next/Prev"),
     };
 
-    let target_pane = panes[target_idx];
+    let target_pane = &panes[target_idx];
     Cmd::new("tmux")
-        .args(&["switch-client", "-t", target_pane])
+        .args(&["switch-client", "-t", target_pane.as_str()])
         .run()?;
 
     signal_daemon();

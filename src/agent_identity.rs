@@ -158,10 +158,14 @@ fn classify_by_command(raw: &str, stem: &str) -> Option<AgentKind> {
 }
 
 fn classify_by_title(title: &str) -> Option<AgentKind> {
+    let lower = title.to_ascii_lowercase();
     if title.contains("Claude Code") {
         return Some(AgentKind::Claude);
     }
-    if title.contains("opencode") || title.starts_with("OC |") || title.contains(" OC |") {
+    if lower.contains("codex") {
+        return Some(AgentKind::Codex);
+    }
+    if lower.contains("opencode") || title.starts_with("OC |") || title.contains(" OC |") {
         return Some(AgentKind::OpenCode);
     }
     if title.contains("Gemini") || title.contains('\u{25C7}') {
@@ -303,6 +307,13 @@ mod tests {
             classify("bash", "OC | Investigating sidebar"),
             Some("opencode".into())
         );
+        assert_eq!(classify("bash", "OpenCode"), Some("opencode".into()));
+    }
+
+    #[test]
+    fn codex_via_title() {
+        assert_eq!(classify("node", "Codex"), Some("codex".into()));
+        assert_eq!(classify("bash", "codex session"), Some("codex".into()));
     }
 
     #[test]

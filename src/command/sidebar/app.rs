@@ -469,7 +469,8 @@ impl SidebarApp {
                 self.list_state.select(None);
             }
         } else if !self.agents.is_empty() && self.list_state.selected().is_none() {
-            self.list_state.select(Some(0));
+            self.list_state
+                .select(self.first_tree_agent_row().or(Some(0)));
         }
 
         self.sync_selection();
@@ -551,12 +552,7 @@ impl SidebarApp {
         }
         if self.tree_enabled && !self.display_rows.is_empty() {
             let i = self.list_state.selected().unwrap_or(0);
-            let next = if i >= self.display_rows.len() - 1 {
-                0
-            } else {
-                i + 1
-            };
-            self.list_state.select(Some(next));
+            self.list_state.select(self.next_tree_agent_row(i));
         } else {
             let i = self.list_state.selected().unwrap_or(0);
             let next = if i >= self.agents.len() - 1 { 0 } else { i + 1 };
@@ -571,12 +567,7 @@ impl SidebarApp {
         }
         if self.tree_enabled && !self.display_rows.is_empty() {
             let i = self.list_state.selected().unwrap_or(0);
-            let prev = if i == 0 {
-                self.display_rows.len() - 1
-            } else {
-                i - 1
-            };
-            self.list_state.select(Some(prev));
+            self.list_state.select(self.previous_tree_agent_row(i));
         } else {
             let i = self.list_state.selected().unwrap_or(0);
             let prev = if i == 0 { self.agents.len() - 1 } else { i - 1 };
@@ -584,10 +575,51 @@ impl SidebarApp {
         }
     }
 
+    fn next_tree_agent_row(&self, current: usize) -> Option<usize> {
+        let len = self.display_rows.len();
+        for step in 1..=len {
+            let idx = (current + step) % len;
+            if matches!(
+                self.display_rows.get(idx),
+                Some(SidebarDisplayRow::Agent { .. })
+            ) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    fn previous_tree_agent_row(&self, current: usize) -> Option<usize> {
+        let len = self.display_rows.len();
+        for step in 1..=len {
+            let idx = (current + len - step) % len;
+            if matches!(
+                self.display_rows.get(idx),
+                Some(SidebarDisplayRow::Agent { .. })
+            ) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    fn first_tree_agent_row(&self) -> Option<usize> {
+        self.display_rows
+            .iter()
+            .position(|row| matches!(row, SidebarDisplayRow::Agent { .. }))
+    }
+
+    fn last_tree_agent_row(&self) -> Option<usize> {
+        self.display_rows
+            .iter()
+            .rposition(|row| matches!(row, SidebarDisplayRow::Agent { .. }))
+    }
+
     pub fn select_first(&mut self) {
         self.selection_mode = SelectionMode::Manual;
         if self.tree_enabled && !self.display_rows.is_empty() {
-            self.list_state.select(Some(0));
+            self.list_state
+                .select(self.first_tree_agent_row().or(Some(0)));
         } else if !self.agents.is_empty() {
             self.list_state.select(Some(0));
         }
@@ -596,7 +628,10 @@ impl SidebarApp {
     pub fn select_last(&mut self) {
         self.selection_mode = SelectionMode::Manual;
         if self.tree_enabled && !self.display_rows.is_empty() {
-            self.list_state.select(Some(self.display_rows.len() - 1));
+            self.list_state.select(
+                self.last_tree_agent_row()
+                    .or(Some(self.display_rows.len() - 1)),
+            );
         } else if !self.agents.is_empty() {
             self.list_state.select(Some(self.agents.len() - 1));
         }
@@ -916,6 +951,20 @@ impl SidebarApp {
         }
     }
 
+    pub fn activate_group_at(&mut self, row_idx: usize) -> bool {
+        self.selection_mode = SelectionMode::Manual;
+        self.list_state.select(Some(row_idx));
+        self.toggle_group_if_selected(row_idx)
+    }
+
+    pub fn is_group_row(&self, row_idx: usize) -> bool {
+        self.tree_enabled
+            && matches!(
+                self.display_rows.get(row_idx),
+                Some(SidebarDisplayRow::Group { .. })
+            )
+    }
+
     fn rebuild_display_rows(&mut self) {
         self.display_rows = build_display_rows(
             &self.agents,
@@ -1186,7 +1235,7 @@ impl SidebarApp {
     }
 }
 
-fn build_display_rows(
+pub(super) fn build_display_rows(
     agents: &[AgentPane],
     tree_enabled: bool,
     group_by: SidebarTreeGroupBy,
@@ -1625,6 +1674,140 @@ mod tests {
             .collect();
         assert_eq!(panes, vec!["%3", "%2", "%1"]);
         assert_eq!(app.list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn activating_tree_group_toggles_collapse() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.tree_enabled = true;
+        app.tree_group_by = SidebarTreeGroupBy::Project;
+        app.agents = vec![
+            test_agent("/tmp/workmux__worktrees/a", "%1"),
+            test_agent("/tmp/workmux__worktrees/c", "%3"),
+        ];
+        app.rebuild_display_rows();
+        app.select_index(0);
+
+        app.activate_selected();
+
+        assert_eq!(app.display_rows.len(), 1);
+        assert!(matches!(
+            app.display_rows.first(),
+            Some(SidebarDisplayRow::Group {
+                expanded: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn activating_tree_group_by_row_toggles_collapse() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.tree_enabled = true;
+        app.tree_group_by = SidebarTreeGroupBy::Project;
+        app.agents = vec![
+            test_agent("/tmp/workmux__worktrees/a", "%1"),
+            test_agent("/tmp/workmux__worktrees/c", "%3"),
+        ];
+        app.rebuild_display_rows();
+
+        assert!(app.activate_group_at(0));
+
+        assert_eq!(app.display_rows.len(), 1);
+        assert!(matches!(
+            app.display_rows.first(),
+            Some(SidebarDisplayRow::Group {
+                expanded: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn tree_group_rows_are_identified_for_mouse_up_guard() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.tree_enabled = true;
+        app.tree_group_by = SidebarTreeGroupBy::Project;
+        app.agents = vec![test_agent("/tmp/workmux__worktrees/a", "%1")];
+        app.rebuild_display_rows();
+
+        assert!(app.is_group_row(0));
+        assert!(!app.is_group_row(1));
+    }
+
+    #[test]
+    fn tree_keyboard_navigation_skips_group_headers() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.tree_enabled = true;
+        app.tree_group_by = SidebarTreeGroupBy::Project;
+        app.agents = vec![
+            test_agent("/tmp/workmux__worktrees/a", "%1"),
+            test_agent("/tmp/api__worktrees/b", "%2"),
+            test_agent("/tmp/workmux__worktrees/c", "%3"),
+        ];
+        app.rebuild_display_rows();
+        // Rows: group(workmux), %1, %3, group(api), %2.
+        app.select_index(4);
+
+        app.previous();
+
+        assert_eq!(app.list_state.selected(), Some(2));
+        assert_eq!(app.selected_agent_idx(), Some(2));
+
+        app.next();
+
+        assert_eq!(app.list_state.selected(), Some(4));
+        assert_eq!(app.selected_agent_idx(), Some(1));
+    }
+
+    #[test]
+    fn tree_default_selection_starts_on_first_agent_not_group_header() {
+        let mut app = SidebarApp::test_with_template_error(TemplateError {
+            location: "compact".to_string(),
+            message: "test".to_string(),
+        });
+        app.tree_enabled = true;
+        app.tree_group_by = SidebarTreeGroupBy::Project;
+
+        let snapshot = SidebarSnapshot {
+            position: SidebarPosition::Left,
+            layout_mode: SidebarLayoutMode::Compact,
+            active_windows: HashSet::new(),
+            active_pane_ids: HashSet::new(),
+            window_pane_counts: HashMap::new(),
+            git_statuses: HashMap::new(),
+            pr_statuses: HashMap::new(),
+            interrupted_pane_ids: HashSet::new(),
+            sleeping_pane_ids: HashSet::new(),
+            agents: vec![
+                test_agent("/tmp/workmux__worktrees/a", "%1"),
+                test_agent("/tmp/api__worktrees/b", "%2"),
+                test_agent("/tmp/workmux__worktrees/c", "%3"),
+            ],
+            config_version: 0,
+        };
+
+        app.apply_snapshot(snapshot);
+
+        assert_eq!(app.list_state.selected(), Some(1));
+        assert_eq!(app.selected_agent_idx(), Some(0));
+
+        app.select_last();
+
+        assert_eq!(app.list_state.selected(), Some(4));
+        assert_eq!(app.selected_agent_idx(), Some(1));
     }
 
     #[test]

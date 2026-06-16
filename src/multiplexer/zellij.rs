@@ -15,7 +15,7 @@ use crate::cmd::Cmd;
 use crate::config::SplitDirection;
 
 use super::handshake::UnixPipeHandshake;
-use super::types::{CreateWindowParams, LivePaneInfo};
+use super::types::{AgentStatus, CreateWindowParams, LivePaneInfo};
 use super::{Multiplexer, PaneHandshake};
 
 /// Zellij multiplexer backend.
@@ -824,6 +824,15 @@ impl Multiplexer for ZellijBackend {
     fn ensure_status_format(&self, _pane_id: &str) -> Result<()> {
         // No-op for zellij
         Ok(())
+    }
+
+    fn persist_agent_update(
+        &self,
+        pane_id: &str,
+        status: Option<AgentStatus>,
+        title_override: Option<String>,
+    ) {
+        crate::state::persist_agent_update(self, pane_id, status, title_override);
     }
 
     // === Pane Setup ===

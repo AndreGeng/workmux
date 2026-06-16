@@ -807,6 +807,15 @@ impl Multiplexer for TmuxBackend {
         Ok(())
     }
 
+    fn persist_agent_update(
+        &self,
+        pane_id: &str,
+        status: Option<AgentStatus>,
+        title_override: Option<String>,
+    ) {
+        crate::state::persist_agent_update(self, pane_id, status, title_override);
+    }
+
     fn split_pane(
         &self,
         target_pane_id: &str,

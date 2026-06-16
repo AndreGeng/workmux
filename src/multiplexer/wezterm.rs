@@ -763,6 +763,15 @@ impl Multiplexer for WezTermBackend {
         Ok(())
     }
 
+    fn persist_agent_update(
+        &self,
+        pane_id: &str,
+        status: Option<AgentStatus>,
+        title_override: Option<String>,
+    ) {
+        crate::state::persist_agent_update(self, pane_id, status, title_override);
+    }
+
     // === Multi-Session/Workspace Support ===
 
     fn current_session(&self) -> Option<String> {

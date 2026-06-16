@@ -696,8 +696,8 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::multiplexer::types::{
-        CreateSessionParams, CreateWindowInSessionParams, CreateWindowParams, LivePaneInfo,
-        PaneSetupOptions, PaneSetupResult,
+        AgentStatus, CreateSessionParams, CreateWindowInSessionParams, CreateWindowParams,
+        LivePaneInfo, PaneSetupOptions, PaneSetupResult,
     };
     use crate::multiplexer::{Multiplexer, PaneHandshake};
     use crate::test_support;
@@ -898,6 +898,14 @@ mod tests {
 
         fn ensure_status_format(&self, _pane_id: &str) -> Result<()> {
             Ok(())
+        }
+
+        fn persist_agent_update(
+            &self,
+            _pane_id: &str,
+            _status: Option<AgentStatus>,
+            _title_override: Option<String>,
+        ) {
         }
 
         fn split_pane(

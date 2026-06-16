@@ -310,6 +310,14 @@ pub trait Multiplexer: Send + Sync {
     /// Ensure the status format is configured (for backends that need it)
     fn ensure_status_format(&self, pane_id: &str) -> Result<()>;
 
+    /// Persist agent pane state after launch or status changes.
+    fn persist_agent_update(
+        &self,
+        pane_id: &str,
+        status: Option<AgentStatus>,
+        title_override: Option<String>,
+    );
+
     // === Pane Setup ===
 
     /// Split a pane, returning the new pane ID.
@@ -534,16 +542,23 @@ pub trait Multiplexer: Send + Sync {
                 let _ = self.clear_pane(&spawned_id);
                 self.send_keys(&spawned_id, &final_command)?;
 
-                // Set working status for agent panes with injected prompts
-                if resolved.prompt_injected
-                    && agent::resolve_profile_with_type(pane_agent, config.agent_type.as_deref())
+                if is_agent_pane {
+                    self.persist_agent_update(&spawned_id, Some(AgentStatus::Working), None);
+
+                    // Set working status for agent panes with injected prompts.
+                    if resolved.prompt_injected
+                        && agent::resolve_profile_with_type(
+                            pane_agent,
+                            config.agent_type.as_deref(),
+                        )
                         .needs_auto_status()
-                {
-                    let icon = config.status_icons.working();
-                    if config.status_format.unwrap_or(true) {
-                        let _ = self.ensure_status_format(&spawned_id);
+                    {
+                        let icon = config.status_icons.working();
+                        if config.status_format.unwrap_or(true) {
+                            let _ = self.ensure_status_format(&spawned_id);
+                        }
+                        let _ = self.set_status(&spawned_id, icon, false);
                     }
-                    let _ = self.set_status(&spawned_id, icon, false);
                 }
 
                 spawned_id
@@ -736,6 +751,262 @@ pub fn create_backend(backend_type: BackendType) -> Arc<dyn Multiplexer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multiplexer::handshake::PaneHandshake;
+    use std::sync::Mutex;
+
+    struct NoopHandshake;
+
+    impl PaneHandshake for NoopHandshake {
+        fn wrapper_command(&self, shell: &str) -> String {
+            shell.to_string()
+        }
+
+        fn wait(self: Box<Self>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct SetupTestMux {
+        persisted: Mutex<Vec<(String, Option<AgentStatus>)>>,
+    }
+
+    impl Multiplexer for SetupTestMux {
+        fn name(&self) -> &'static str {
+            "tmux"
+        }
+
+        fn is_running(&self) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn current_pane_id(&self) -> Option<String> {
+            None
+        }
+
+        fn active_pane_id(&self) -> Option<String> {
+            None
+        }
+
+        fn get_client_active_pane_path(&self) -> Result<PathBuf> {
+            Ok(PathBuf::from("/repo"))
+        }
+
+        fn create_window(&self, _params: CreateWindowParams) -> Result<String> {
+            Ok("%1".to_string())
+        }
+
+        fn create_session(&self, _params: CreateSessionParams) -> Result<String> {
+            Ok("%1".to_string())
+        }
+
+        fn switch_to_session(&self, _prefix: &str, _name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn session_exists(&self, _full_name: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn kill_session(&self, _full_name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn kill_window(&self, _full_name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn schedule_window_close(&self, _full_name: &str, _delay: Duration) -> Result<()> {
+            Ok(())
+        }
+
+        fn schedule_session_close(&self, _full_name: &str, _delay: Duration) -> Result<()> {
+            Ok(())
+        }
+
+        fn run_deferred_script(&self, _script: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn shell_select_window_cmd(&self, _full_name: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn shell_kill_window_cmd(&self, _full_name: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn shell_switch_session_cmd(&self, _full_name: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn shell_kill_session_cmd(&self, _full_name: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn select_window(&self, _prefix: &str, _name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn window_exists(&self, _prefix: &str, _name: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn window_exists_by_full_name(&self, _full_name: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn current_window_name(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn select_pane(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn switch_to_pane(&self, _pane_id: &str, _window_hint: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+
+        fn kill_pane(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_all_window_names(&self) -> Result<HashSet<String>> {
+            Ok(HashSet::new())
+        }
+
+        fn get_all_session_names(&self) -> Result<HashSet<String>> {
+            Ok(HashSet::new())
+        }
+
+        fn filter_active_windows(&self, windows: &[String]) -> Result<Vec<String>> {
+            Ok(windows.to_vec())
+        }
+
+        fn find_last_window_with_prefix(&self, _prefix: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn find_last_window_with_base_handle(
+            &self,
+            _prefix: &str,
+            _base_handle: &str,
+        ) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn wait_until_windows_closed(&self, _full_window_names: &[String]) -> Result<()> {
+            Ok(())
+        }
+
+        fn wait_until_session_closed(&self, _full_session_name: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn respawn_pane(&self, pane_id: &str, _cwd: &Path, _cmd: Option<&str>) -> Result<String> {
+            Ok(pane_id.to_string())
+        }
+
+        fn split_pane(
+            &self,
+            _target_pane_id: &str,
+            _direction: &SplitDirection,
+            _cwd: &Path,
+            _size: Option<u16>,
+            _percentage: Option<u8>,
+            _command: Option<&str>,
+        ) -> Result<String> {
+            Ok("%2".to_string())
+        }
+
+        fn capture_pane(&self, _pane_id: &str, _lines: u16) -> Option<String> {
+            None
+        }
+
+        fn send_keys(&self, _pane_id: &str, _command: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_key(&self, _pane_id: &str, _key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn paste_multiline(&self, _pane_id: &str, _content: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_keys_to_agent(
+            &self,
+            _pane_id: &str,
+            _command: &str,
+            _agent: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_pane(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_default_shell(&self) -> Result<String> {
+            Ok("/bin/sh".to_string())
+        }
+
+        fn create_handshake(&self) -> Result<Box<dyn PaneHandshake>> {
+            Ok(Box::new(NoopHandshake))
+        }
+
+        fn set_status(
+            &self,
+            _pane_id: &str,
+            _icon: &str,
+            _auto_clear_on_focus: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_status(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn ensure_status_format(&self, _pane_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn persist_agent_update(
+            &self,
+            pane_id: &str,
+            status: Option<AgentStatus>,
+            _title_override: Option<String>,
+        ) {
+            self.persisted
+                .lock()
+                .unwrap()
+                .push((pane_id.to_string(), status));
+        }
+
+        fn instance_id(&self) -> String {
+            "test".to_string()
+        }
+
+        fn get_live_pane_info(&self, _pane_id: &str) -> Result<Option<LivePaneInfo>> {
+            Ok(Some(LivePaneInfo {
+                pid: Some(123),
+                current_command: Some("claude".to_string()),
+                working_dir: PathBuf::from("/repo"),
+                title: None,
+                session: Some("s".to_string()),
+                window: Some("w".to_string()),
+            }))
+        }
+
+        fn get_all_live_pane_info(
+            &self,
+        ) -> Result<std::collections::HashMap<String, LivePaneInfo>> {
+            Ok(std::collections::HashMap::new())
+        }
+    }
 
     #[test]
     fn no_env_defaults_to_tmux() {
@@ -811,5 +1082,61 @@ mod tests {
     #[test]
     fn all_env_vars_set() {
         assert_eq!(resolve_backend(true, true, true, true), BackendType::Tmux);
+    }
+
+    #[test]
+    fn setup_panes_persists_prompt_injected_agent_immediately() {
+        let mux = SetupTestMux::default();
+        let config = Config {
+            agent: Some("claude".to_string()),
+            ..Config::default()
+        };
+        let panes = vec![PaneConfig {
+            command: Some("<agent>".to_string()),
+            ..PaneConfig::default()
+        }];
+        let options = PaneSetupOptions {
+            run_commands: true,
+            prompt_file_path: Some(Path::new("prompt.txt")),
+            worktree_root: None,
+            lima_vm_name: None,
+            resume_mode: ResumeMode::None,
+        };
+
+        mux.setup_panes("%1", &panes, Path::new("/repo"), options, &config, None)
+            .unwrap();
+
+        assert_eq!(
+            mux.persisted.lock().unwrap().as_slice(),
+            &[("%1".to_string(), Some(AgentStatus::Working))]
+        );
+    }
+
+    #[test]
+    fn setup_panes_persists_agent_before_prompt_or_chat() {
+        let mux = SetupTestMux::default();
+        let config = Config {
+            agent: Some("claude".to_string()),
+            ..Config::default()
+        };
+        let panes = vec![PaneConfig {
+            command: Some("<agent>".to_string()),
+            ..PaneConfig::default()
+        }];
+        let options = PaneSetupOptions {
+            run_commands: true,
+            prompt_file_path: None,
+            worktree_root: None,
+            lima_vm_name: None,
+            resume_mode: ResumeMode::None,
+        };
+
+        mux.setup_panes("%1", &panes, Path::new("/repo"), options, &config, None)
+            .unwrap();
+
+        assert_eq!(
+            mux.persisted.lock().unwrap().as_slice(),
+            &[("%1".to_string(), Some(AgentStatus::Working))]
+        );
     }
 }

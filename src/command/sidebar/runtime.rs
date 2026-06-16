@@ -230,7 +230,9 @@ fn process_event(
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(idx) = app.hit_test(mouse.column, mouse.row) {
-                        app.start_drag(idx);
+                        if !app.activate_group_at(idx) {
+                            app.start_drag(idx);
+                        }
                     }
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
@@ -241,8 +243,11 @@ fn process_event(
                 MouseEventKind::Up(MouseButton::Left) => {
                     let reordered = app.finish_drag();
                     if !reordered && let Some(idx) = app.hit_test(mouse.column, mouse.row) {
+                        if app.is_group_row(idx) {
+                            return;
+                        }
                         app.select_index(idx);
-                        app.jump_to_selected();
+                        app.activate_selected();
                     }
                 }
                 MouseEventKind::ScrollUp => {
