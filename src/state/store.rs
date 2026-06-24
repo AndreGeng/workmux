@@ -510,6 +510,19 @@ impl StateStore {
                         let _ = mux.clear_status(&state.pane_key.pane_id);
                     }
                 }
+                Some(live)
+                    if is_shell_command(Some(&state.command))
+                        && classify_live_agent_kind(live).is_none() =>
+                {
+                    info!(
+                        pane_id,
+                        stored_command = state.command,
+                        live_command = live.current_command.as_deref().unwrap_or(""),
+                        "reconcile: removing agent, shell pane no longer has live agent evidence"
+                    );
+                    self.delete_agent(&state.pane_key)?;
+                    let _ = mux.clear_status(&state.pane_key.pane_id);
+                }
                 Some(live) => {
                     // Valid - include in dashboard
                     let mut agent_pane = state.to_agent_pane(
@@ -718,30 +731,25 @@ fn descendant_agent_kind(root_pid: u32, entries: &[(u32, u32, String)]) -> Optio
 }
 
 fn command_agent_kind(command: &str) -> Option<String> {
-    let command = command.to_ascii_lowercase();
-    if command.contains("opencode") {
+    let token = command.split_whitespace().next()?;
+    let stem = std::path::Path::new(token)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(token)
+        .trim_matches(|c| c == '\'' || c == '"')
+        .to_ascii_lowercase();
+
+    if stem == "opencode" || stem == "opencode-ai" {
         return Some("opencode".to_string());
     }
-    if command.contains("codex") {
+    if stem == "codex" || stem.starts_with("codex-") {
         return Some("codex".to_string());
     }
-    if command.ends_with("/pi") || command == "pi" || command.contains("/pi ") {
-        return Some("pi".to_string());
-    }
-    if command.ends_with("/claude") || command == "claude" || command.contains("/claude ") {
-        return Some("claude".to_string());
-    }
-    if command.contains("gemini") {
-        return Some("gemini".to_string());
-    }
-    if command.contains("vibe") {
-        return Some("vibe".to_string());
-    }
-    if command.contains("kiro-cli") {
-        return Some("kiro-cli".to_string());
-    }
-    if command.contains("copilot") {
-        return Some("copilot".to_string());
+    if matches!(
+        stem.as_str(),
+        "pi" | "claude" | "gemini" | "vibe" | "kiro-cli" | "copilot"
+    ) {
+        return Some(stem);
     }
     None
 }
@@ -871,6 +879,16 @@ mod tests {
             boot_id: None,
             agent_kind: None,
         }
+    }
+
+    #[test]
+    fn command_agent_kind_uses_executable_not_arguments() {
+        assert_eq!(
+            command_agent_kind("/opt/homebrew/bin/codex --resume"),
+            Some("codex".to_string())
+        );
+        assert_eq!(command_agent_kind("python script_mentions_codex.py"), None);
+        assert_eq!(command_agent_kind("rg codex src"), None);
     }
 
     #[test]

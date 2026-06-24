@@ -248,7 +248,11 @@ fn read_manual_order() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn agent_list_for_navigation(agents: &[crate::multiplexer::AgentPane], config: &Config) -> String {
+fn agent_list_for_navigation(
+    agents: &[crate::multiplexer::AgentPane],
+    config: &Config,
+    sleeping_pane_ids: &HashSet<String>,
+) -> String {
     let tree_enabled = config.sidebar.tree.enabled.unwrap_or(false);
     if !tree_enabled {
         return agents
@@ -269,7 +273,7 @@ fn agent_list_for_navigation(agents: &[crate::multiplexer::AgentPane], config: &
         true,
         group_by,
         &HashSet::new(),
-        &HashSet::new(),
+        sleeping_pane_ids,
         window_prefix,
     )
     .into_iter()
@@ -1595,7 +1599,11 @@ pub fn run() -> Result<()> {
 
             let agent_list = {
                 let config = config.lock().unwrap();
-                agent_list_for_navigation(&output.snapshot.agents, &config)
+                agent_list_for_navigation(
+                    &output.snapshot.agents,
+                    &config,
+                    &output.snapshot.sleeping_pane_ids,
+                )
             };
 
             if agent_list != last_agent_list {
@@ -1877,7 +1885,10 @@ mod tests {
             tree_agent("/tmp/workmux__worktrees/c", "%3"),
         ];
 
-        assert_eq!(agent_list_for_navigation(&agents, &config), "%1 %3 %2");
+        assert_eq!(
+            agent_list_for_navigation(&agents, &config, &HashSet::new()),
+            "%1 %3 %2"
+        );
     }
 
     #[test]

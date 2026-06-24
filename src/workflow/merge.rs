@@ -349,5 +349,3 @@ pub fn merge(
         had_staged_changes,
     })
 }
-
-

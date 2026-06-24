@@ -10,7 +10,7 @@
 pub fn show_system(title: &str, subtitle: Option<&str>, message: &str) {
     #[cfg(target_os = "macos")]
     {
-        use mac_notification_sys::{set_application, Notification};
+        use mac_notification_sys::{Notification, set_application};
         if let Err(e) = set_application("com.apple.Terminal") {
             tracing::debug!("Failed to set notification application: {:?}", e);
         }
