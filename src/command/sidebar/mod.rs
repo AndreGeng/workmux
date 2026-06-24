@@ -789,14 +789,26 @@ pub fn navigate(action: NavAction) -> Result<()> {
         anyhow::bail!("no sidebar agents found");
     }
 
-    // Find current agent by active pane ID
-    let current_pane_id = Cmd::new("tmux")
-        .args(&["display-message", "-p", "#{pane_id}"])
+    // Find current agent by active pane ID, plus its window for the non-agent case.
+    let current_info = Cmd::new("tmux")
+        .args(&["display-message", "-p", "#{pane_id}\t#{window_id}"])
         .run_and_capture_stdout()
         .unwrap_or_default();
-    let current_pane_id = current_pane_id.trim();
+    let mut info_parts = current_info.trim().split('\t');
+    let current_pane_id = info_parts.next().unwrap_or("");
+    let current_window_id = info_parts.next().unwrap_or("");
 
     let current_idx = panes.iter().position(|pid| pid == current_pane_id);
+
+    // When focus is on a non-agent pane (e.g. lazygit or the sidebar itself),
+    // resolve the "current" agent as the one sharing the same tmux window.
+    // workmux gives each worktree its own window with exactly one agent pane,
+    // so the co-window agent is the natural anchor for Next/Prev.
+    let current_idx = if current_idx.is_some() {
+        current_idx
+    } else {
+        resolve_current_idx_from_window(&panes, current_window_id)
+    };
 
     let len = panes.len();
     let target_idx = match &action {
@@ -813,6 +825,24 @@ pub fn navigate(action: NavAction) -> Result<()> {
 
     signal_daemon();
     Ok(())
+}
+
+/// Find the position in `panes` of the agent pane that shares `window_id`.
+/// Used when the active pane is a non-agent pane (lazygit/sidebar): the
+/// co-window agent is the natural "current" agent for Next/Prev navigation.
+/// Returns None if `window_id` is empty or the window contains no agent panes.
+fn resolve_current_idx_from_window(panes: &[String], window_id: &str) -> Option<usize> {
+    if window_id.is_empty() {
+        return None;
+    }
+    let window_panes = Cmd::new("tmux")
+        .args(&["list-panes", "-t", window_id, "-F", "#{pane_id}"])
+        .run_and_capture_stdout()
+        .ok()?;
+    let in_window: std::collections::HashSet<&str> = window_panes.split_whitespace().collect();
+    panes
+        .iter()
+        .position(|pid| in_window.contains(pid.as_str()))
 }
 
 #[cfg(test)]
